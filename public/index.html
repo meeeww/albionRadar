@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Albion radar</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    height: 100vh;
+    display: grid;
+    grid-template-columns: 1fr 300px;
+    font: 14px/1.4 ui-sans-serif, sans-serif;
+    background: #10140f;
+    color: #e7e1d1;
+  }
+  header {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 18px 8px;
+  }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  p { margin: 2px 0 0; color: #b7b09d; }
+  .controls { display: flex; gap: 8px; align-items: center; }
+  button {
+    background: #1d2118;
+    color: inherit;
+    border: 1px solid #3a4030;
+    border-radius: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  button.active { border-color: #e2c56a; color: #e2c56a; }
+  #scope {
+    min-height: 0;
+    display: grid;
+    place-items: center;
+    padding: 8px 8px 18px 18px;
+  }
+  canvas { width: min(100%, calc(100vh - 110px)); height: auto; aspect-ratio: 1; }
+  aside {
+    margin: 8px 18px 18px 0;
+    background: #1a1e16;
+    border: 1px solid #2e3426;
+    border-radius: 10px;
+    overflow: auto;
+    padding: 12px 14px 18px;
+  }
+  aside h2 { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: #b7b09d; margin: 14px 0 6px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 0; padding: 0; list-style: none; }
+  .legend li { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  #list { margin: 0; padding: 0; list-style: none; }
+  #list li { margin: 5px 0; font-variant-numeric: tabular-nums; }
+  .resource { color: #8fce6a; }
+  .mob { color: #e06b6b; }
+  .chest { color: #e2c56a; }
+  .dungeon { color: #e39b54; }
+  .mist { color: #b388ff; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Radar</h1>
+    <p id="status">Waiting for your position. Move once after you enter a zone.</p>
+  </div>
+  <div class="controls">
+    <button type="button" id="zoom-out" title="Zoom out">−</button>
+    <span id="range">50 m</span>
+    <button type="button" id="zoom-in" title="Zoom in">+</button>
+    <button type="button" data-filter="all" class="active">All</button>
+    <button type="button" data-filter="resource">Resources</button>
+    <button type="button" data-filter="mob">Mobs</button>
+    <button type="button" data-filter="chest">Chests</button>
+    <button type="button" data-filter="dungeon">Dungeons</button>
+    <button type="button" id="clear">Clear</button>
+  </div>
+</header>
+<div id="scope"><canvas id="map" width="720" height="720"></canvas></div>
+<aside>
+  <h2>On the map</h2>
+  <ul class="legend">
+    <li><span class="swatch" style="background:#c4a574"></span>Wood</li>
+    <li><span class="swatch" style="background:#d5d8d2"></span>Rock</li>
+    <li><span class="swatch" style="background:#8fce6a"></span>Fiber</li>
+    <li><span class="swatch" style="background:#d4a574"></span>Hide</li>
+    <li><span class="swatch" style="background:#7eb6ff"></span>Ore</li>
+    <li><span class="swatch" style="background:#e06b6b;border-radius:50%"></span>Mob</li>
+    <li><span class="swatch" style="background:#e2c56a"></span>Chest</li>
+    <li><span class="swatch" style="background:#e39b54"></span>Dungeon</li>
+    <li><span class="swatch" style="background:#b388ff;border-radius:50%"></span>Mist</li>
+  </ul>
+  <h2>Nearest</h2>
+  <ul id="list"></ul>
+</aside>
+<script>
+const entities = new Map()
+let player = { x: null, y: null, destX: null, destY: null, map: '' }
+let filter = 'all'
+let radius = Number(localStorage.getItem('radar-radius')) || 50
+const canvas = document.getElementById('map')
+const ctx = canvas.getContext('2d')
+const list = document.getElementById('list')
+const status = document.getElementById('status')
+const rangeLabel = document.getElementById('range')
+const resourceColors = { wood: '#c4a574', rock: '#d5d8d2', fiber: '#8fce6a', hide: '#d4a574', ore: '#7eb6ff', resource: '#8fce6a' }
+
+function hasPlayer() {
+  return Number.isFinite(player.x) && Number.isFinite(player.y)
+}
+
+function distance(entity) {
+  if (!hasPlayer()) return Infinity
+  const dx = entity.x - player.x
+  const dy = entity.y - player.y
+  return Math.hypot(dx, dy)
+}
+
+function shown() {
+  const rows = [...entities.values()]
+  if (filter === 'all') return rows
+  if (filter === 'dungeon') return rows.filter((entity) => entity.kind === 'dungeon' || entity.kind === 'mist')
+  return rows.filter((entity) => entity.kind === filter)
+}
+
+function labelOf(entity) {
+  if (entity.kind === 'resource') {
+    const tier = entity.tier ? 'T' + entity.tier + ' ' : ''
+    const enchant = entity.enchant ? '.' + entity.enchant : ''
+    return tier + (entity.name || 'resource') + enchant
+  }
+  if (entity.kind === 'mob') return 'mob'
+  if (entity.kind === 'mist') return 'mist'
+  if (entity.kind === 'chest') return 'chest'
+  return 'dungeon'
+}
+
+function colorOf(entity) {
+  if (entity.kind === 'resource') return resourceColors[entity.name] || '#8fce6a'
+  if (entity.kind === 'mob') return '#e06b6b'
+  if (entity.kind === 'chest') return '#e2c56a'
+  if (entity.kind === 'dungeon') return '#e39b54'
+  return '#b388ff'
+}
+
+function resize() {
+  const scope = document.getElementById('scope')
+  const size = Math.max(280, Math.min(scope.clientWidth - 8, scope.clientHeight - 8))
+  const dpr = window.devicePixelRatio || 1
+  canvas.width = Math.floor(size * dpr)
+  canvas.height = Math.floor(size * dpr)
+  canvas.style.width = size + 'px'
+  canvas.style.height = size + 'px'
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  draw()
+}
+
+function draw() {
+  const size = canvas.clientWidth
+  const cx = size / 2
+  const cy = size / 2
+  const ring = size / 2 - 28
+  ctx.clearRect(0, 0, size, size)
+  ctx.fillStyle = '#171c14'
+  ctx.beginPath()
+  ctx.arc(cx, cy, ring, 0, Math.PI * 2)
+  ctx.fill()
+
+  rangeLabel.textContent = radius + ' m'
+  status.textContent = hasPlayer()
+    ? (player.map ? player.map + ' · you are the center' : 'You are the center')
+    : 'Waiting for your position. Move once after you enter a zone.'
+
+  ctx.save()
+  ctx.beginPath()
+  ctx.arc(cx, cy, ring, 0, Math.PI * 2)
+  ctx.clip()
+
+  ctx.strokeStyle = '#2e3426'
+  ctx.lineWidth = 1
+  for (const step of [0.25, 0.5, 0.75, 1]) {
+    ctx.beginPath()
+    ctx.arc(cx, cy, ring * step, 0, Math.PI * 2)
+    ctx.stroke()
+  }
+  ctx.beginPath()
+  ctx.moveTo(cx, cy - ring)
+  ctx.lineTo(cx, cy + ring)
+  ctx.moveTo(cx - ring, cy)
+  ctx.lineTo(cx + ring, cy)
+  ctx.stroke()
+
+  const scale = ring / radius
+  if (hasPlayer() && Number.isFinite(player.destX) && Number.isFinite(player.destY)) {
+    const dx = player.destX - player.x
+    const dy = player.destY - player.y
+    const length = Math.hypot(dx, dy)
+    if (length > 0.4) {
+      const tip = Math.min(length, radius) * scale
+      ctx.strokeStyle = '#e7e1d1'
+      ctx.globalAlpha = 0.45
+      ctx.beginPath()
+      ctx.moveTo(cx, cy)
+      ctx.lineTo(cx + (dx / length) * tip, cy - (dy / length) * tip)
+      ctx.stroke()
+      ctx.globalAlpha = 1
+    }
+  }
+
+  const visible = shown().filter((entity) => distance(entity) <= radius * 1.02)
+  for (const entity of visible) {
+    const px = cx + (entity.x - player.x) * scale
+    const py = cy - (entity.y - player.y) * scale
+    ctx.fillStyle = colorOf(entity)
+    ctx.beginPath()
+    if (entity.kind === 'resource') ctx.fillRect(px - 4, py - 4, 8, 8)
+    else if (entity.kind === 'chest' || entity.kind === 'dungeon') {
+      ctx.moveTo(px, py - 6)
+      ctx.lineTo(px + 6, py)
+      ctx.lineTo(px, py + 6)
+      ctx.lineTo(px - 6, py)
+      ctx.fill()
+    } else {
+      ctx.arc(px, py, entity.kind === 'mist' ? 5 : 4, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
+
+  ctx.restore()
+  ctx.strokeStyle = '#5c664c'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.arc(cx, cy, ring, 0, Math.PI * 2)
+  ctx.stroke()
+  ctx.fillStyle = '#b7b09d'
+  ctx.font = '12px sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillText('N', cx, cy - ring - 8)
+  ctx.fillText(String(radius), cx, cy - ring + 16)
+
+  ctx.fillStyle = '#f4f0e4'
+  ctx.beginPath()
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2)
+  ctx.fill()
+
+  const nearest = shown()
+    .map((entity) => ({ entity, distance: distance(entity) }))
+    .filter((row) => Number.isFinite(row.distance))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 24)
+  list.innerHTML = ''
+  for (const row of nearest) {
+    const item = document.createElement('li')
+    item.className = row.entity.kind
+    item.textContent = row.distance.toFixed(0) + '  ' + labelOf(row.entity)
+    list.appendChild(item)
+  }
+}
+
+function upsert(entity) {
+  entities.set(String(entity.id), entity)
+  draw()
+}
+
+function setPlayer(next) {
+  player = next
+  draw()
+}
+
+document.querySelectorAll('[data-filter]').forEach((button) => {
+  button.onclick = () => {
+    filter = button.dataset.filter
+    document.querySelectorAll('[data-filter]').forEach((item) => item.classList.remove('active'))
+    button.classList.add('active')
+    draw()
+  }
+})
+
+function setRadius(next) {
+  radius = Math.max(15, Math.min(120, next))
+  localStorage.setItem('radar-radius', String(radius))
+  draw()
+}
+
+document.getElementById('zoom-in').onclick = () => setRadius(radius - 10)
+document.getElementById('zoom-out').onclick = () => setRadius(radius + 10)
+document.getElementById('scope').onwheel = (event) => {
+  event.preventDefault()
+  setRadius(radius + Math.sign(event.deltaY) * 5)
+}
+
+document.getElementById('clear').onclick = async () => {
+  await fetch('/api/clear', { method: 'POST' })
+  entities.clear()
+  draw()
+}
+
+window.addEventListener('resize', resize)
+
+fetch('/api/state').then((res) => res.json()).then((data) => {
+  player = data.player
+  for (const entity of data.entities) entities.set(String(entity.id), entity)
+  resize()
+})
+
+const source = new EventSource('/stream')
+source.addEventListener('player', (event) => setPlayer(JSON.parse(event.data)))
+source.addEventListener('upsert', (event) => upsert(JSON.parse(event.data)))
+source.addEventListener('remove', (event) => {
+  entities.delete(String(JSON.parse(event.data).id))
+  draw()
+})
+source.addEventListener('reset', (event) => {
+  const data = JSON.parse(event.data)
+  entities.clear()
+  if (data.player) player = data.player
+  draw()
+})
+</script>
+</body>
+</html>
