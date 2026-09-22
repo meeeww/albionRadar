@@ -116,7 +116,7 @@
       <label>Scale <input id="scale" type="number" min="4" max="80" step="0.1" value="14"></label>
       <label>Angle <input id="angle" type="number" min="-180" max="180" value="0"></label>
     </div>
-    <p>Mark a node, hover it in the game, then capture. That fills scale and angle.</p>
+    <p>Press Capture, then move the cursor onto the highlighted node. It is read when the countdown ends.</p>
     <div class="row">
       <button type="button" id="mark">Mark node</button>
       <button type="button" id="capture">Capture</button>
@@ -137,6 +137,7 @@ let filter = 'all'
 let radius = Number(localStorage.getItem('radar-radius')) || 50
 let gatherTarget = null
 let gathering = false
+let captureWait = false
 const canvas = document.getElementById('map')
 const ctx = canvas.getContext('2d')
 const list = document.getElementById('list')
@@ -361,7 +362,9 @@ function applyGather(data) {
   gathering = Boolean(data.enabled)
   gatherTarget = data.targetId || null
   document.getElementById('gather-toggle').textContent = gathering ? 'Stop gathering' : 'Start gathering'
-  document.getElementById('gather-status').textContent = data.detail || (gathering ? 'Looking for a node.' : 'Off. Choose what to pick up, aim the cursor, then start.')
+  if (!captureWait) {
+    document.getElementById('gather-status').textContent = data.detail || (gathering ? 'Looking for a node.' : 'Off. Choose what to pick up, aim the cursor, then start.')
+  }
   if (data.status === 'calibrated') {
     document.getElementById('scale').value = data.scale
     document.getElementById('angle').value = data.angle
@@ -386,14 +389,29 @@ document.getElementById('mark').onclick = async () => {
   draw()
 }
 document.getElementById('capture').onclick = async () => {
-  const res = await fetch('/api/gather/calibrate', { method: 'POST' })
-  const data = await res.json()
-  if (data.scale != null) {
-    document.getElementById('scale').value = data.scale
-    document.getElementById('angle').value = data.angle
+  if (captureWait) return
+  const button = document.getElementById('capture')
+  const status = document.getElementById('gather-status')
+  captureWait = true
+  button.disabled = true
+  try {
+    for (let left = 3; left > 0; left--) {
+      status.textContent = 'Move the cursor onto the highlighted node. Capturing in ' + left + '…'
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+    status.textContent = 'Reading the cursor…'
+    const res = await fetch('/api/gather/calibrate', { method: 'POST' })
+    const data = await res.json()
+    if (data.scale != null) {
+      document.getElementById('scale').value = data.scale
+      document.getElementById('angle').value = data.angle
+    }
+    status.textContent = data.detail || 'Capture failed.'
+    draw()
+  } finally {
+    captureWait = false
+    button.disabled = false
   }
-  document.getElementById('gather-status').textContent = data.detail || 'Capture failed.'
-  draw()
 }
 document.getElementById('aim').onclick = async () => {
   await saveGather(false)

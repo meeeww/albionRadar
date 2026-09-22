@@ -222,7 +222,7 @@ function createGather(snapshot, emit) {
         if (!node) return { ok: false, detail: 'Need a resource about 8 to 40 m away. Walk until one is on the radar.' }
         state.targetId = node.id
         const away = distance(player, node)
-        publish('marking', `Hover ${label(node)} in the game (${away.toFixed(0)} m, highlighted). Then press Capture.`)
+        publish('marking', `${label(node)} is highlighted (${away.toFixed(0)} m). Press Capture, then move the cursor onto that node.`)
         return { ok: true, detail: state.detail }
     }
 
@@ -240,7 +240,7 @@ function createGather(snapshot, emit) {
         const cursor = mouse()
         if (!cursor) return { ok: false, detail: 'Mouse control is not installed.' }
         const solved = solveView(player, node, cursor.getMousePos(), rect)
-        if (!solved) return { ok: false, detail: 'Put the cursor on the highlighted node, not on your character, then capture again.' }
+        if (!solved) return { ok: false, detail: 'The cursor was still on your character when the timer ended. Press Capture, then move onto the highlighted node before it reaches zero.' }
         settings.scale = Math.max(4, Math.min(80, solved.scale))
         settings.angle = solved.angle
         publish('calibrated', `Scale ${settings.scale}, angle ${settings.angle}. Press Aim to check the cursor lands on the node.`)
