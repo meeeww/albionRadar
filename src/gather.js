@@ -2,11 +2,15 @@ const { Window } = require('./window')
 
 const RESOURCE_TYPES = ['wood', 'rock', 'fiber', 'hide', 'ore']
 const REACH = 4
-const WALK_STEP = 12
-const APPROACH_CLICK_MS = 2500
-const APPROACH_GIVE_UP_MS = 18000
+const WALK_STEP = 7
+const CLICK_MS = 600
 const HARVEST_GIVE_UP_MS = 14000
 const SKIP_MS = 45000
+const STUCK_MOVE = 1.2
+const STUCK_CLICKS = 3
+const SURROUND_RADIUS = 5
+const SURROUND_STEPS = 8
+const SURROUND_LAPS = 2
 
 function projectPoint(player, point, rect, scale, angleDeg) {
     const dx = point.x - player.x
@@ -35,6 +39,15 @@ function clampToWindow(point, rect) {
 
 function distance(player, entity) {
     return Math.hypot(entity.x - player.x, entity.y - player.y)
+}
+
+function surroundPoint(player, node, step, radius) {
+    const toward = Math.atan2(node.y - player.y, node.x - player.x)
+    const angle = toward + Math.PI / 2 + step * (Math.PI * 2 / SURROUND_STEPS)
+    return {
+        x: player.x + Math.cos(angle) * radius,
+        y: player.y + Math.sin(angle) * radius,
+    }
 }
 
 function pickTarget(player, entities, settings, skipped, now) {
@@ -73,6 +86,11 @@ function createGather(snapshot, emit) {
     let lastClick = 0
     let harvestSize = null
     let busy = false
+    let anchor = null
+    let stuckClicks = 0
+    let surroundStep = 0
+    let surroundLaps = 0
+    let surroundStartDistance = 0
 
     function publish(status, detail) {
         if (state.status === status && state.detail === detail) return
@@ -111,6 +129,7 @@ function createGather(snapshot, emit) {
         if (!settings.enabled) {
             phase = 'idle'
             state.targetId = null
+            resetRoute()
             publish('off', '')
         }
         emit('gather', publicState())
@@ -160,6 +179,39 @@ function createGather(snapshot, emit) {
         return `T${entity.tier || '?'} ${entity.name}`
     }
 
+    function resetRoute() {
+        anchor = null
+        stuckClicks = 0
+        surroundStep = 0
+        surroundLaps = 0
+        surroundStartDistance = 0
+    }
+
+    function beginSurround(player, node, now) {
+        phase = 'surround'
+        phaseSince = now
+        surroundStep = 0
+        surroundLaps = 0
+        surroundStartDistance = distance(player, node)
+        anchor = { x: player.x, y: player.y }
+        stuckClicks = 0
+    }
+
+    function stuckSinceLastClick(player) {
+        if (!anchor) {
+            anchor = { x: player.x, y: player.y }
+            return false
+        }
+        const moved = Math.hypot(player.x - anchor.x, player.y - anchor.y)
+        anchor = { x: player.x, y: player.y }
+        if (moved >= STUCK_MOVE) {
+            stuckClicks = 0
+            return false
+        }
+        stuckClicks += 1
+        return stuckClicks >= STUCK_CLICKS
+    }
+
     function tick() {
         if (busy || !settings.enabled) return
         busy = true
@@ -192,6 +244,7 @@ function createGather(snapshot, emit) {
             phase = 'approach'
             phaseSince = now
             harvestSize = null
+            resetRoute()
             if (!next) {
                 publish('searching', 'No matching resource in range.')
                 return
@@ -244,21 +297,63 @@ function createGather(snapshot, emit) {
             return
         }
 
-        if (phase !== 'approach') {
+        if (phase !== 'approach' && phase !== 'surround') {
             phase = 'approach'
             phaseSince = now
+            resetRoute()
         }
-        if (now - phaseSince > APPROACH_GIVE_UP_MS) {
-            skipped.set(node.id, now + SKIP_MS)
-            state.targetId = null
-            phase = 'idle'
-            publish('searching', `Could not reach ${label(node)}.`)
+        if (now - lastClick < CLICK_MS) {
+            publish(
+                phase === 'surround' ? 'surrounding' : 'walking',
+                phase === 'surround'
+                    ? `Moving around ${label(node)} to get unstuck.`
+                    : `Walking to ${label(node)}, ${away.toFixed(0)} m away.`,
+            )
             return
         }
-        if (now - lastClick < APPROACH_CLICK_MS) {
-            publish('walking', `Walking to ${label(node)}, ${away.toFixed(0)} m away.`)
-            return
+
+        if (phase === 'approach' && stuckSinceLastClick(player)) {
+            beginSurround(player, node, now)
         }
+
+        if (phase === 'surround') {
+            if (surroundStep >= SURROUND_STEPS) {
+                surroundStep = 0
+                surroundLaps += 1
+                const closer = distance(player, node) + 2 < surroundStartDistance
+                if (closer) {
+                    phase = 'approach'
+                    phaseSince = now
+                    stuckClicks = 0
+                    anchor = { x: player.x, y: player.y }
+                    publish('walking', `Clear of the block. Walking to ${label(node)}.`)
+                } else if (surroundLaps >= SURROUND_LAPS) {
+                    skipped.set(node.id, now + SKIP_MS)
+                    state.targetId = null
+                    phase = 'idle'
+                    resetRoute()
+                    publish('searching', `Could not reach ${label(node)} after moving around it.`)
+                    return
+                } else {
+                    surroundStartDistance = distance(player, node)
+                    publish('surrounding', `Still blocked. Circling ${label(node)} again.`)
+                }
+            }
+            if (phase === 'surround') {
+                const point = projectPoint(
+                    player,
+                    surroundPoint(player, node, surroundStep, SURROUND_RADIUS),
+                    rect,
+                    settings.scale,
+                    settings.angle,
+                )
+                surroundStep += 1
+                if (!clickAt(point, rect)) return
+                publish('surrounding', `Moving around ${label(node)} to get unstuck.`)
+                return
+            }
+        }
+
         const stepDistance = Math.min(away, WALK_STEP)
         const point = projectPoint(player, {
             x: player.x + ((node.x - player.x) / away) * stepDistance,
@@ -268,7 +363,7 @@ function createGather(snapshot, emit) {
         publish('walking', `Walking to ${label(node)}, ${away.toFixed(0)} m away.`)
     }
 
-    const timer = setInterval(tick, 400)
+    const timer = setInterval(tick, 200)
     if (typeof timer.unref === 'function') timer.unref()
 
     return { configure, aim, publicState }
@@ -278,4 +373,5 @@ module.exports = {
     createGather,
     projectPoint,
     pickTarget,
+    surroundPoint,
 }
