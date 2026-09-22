@@ -389,8 +389,9 @@ function createGather(snapshot, emit, terrain) {
             if (Number.isFinite(delta) && delta < 0) noteDamage(parameters[6])
         }
         if (kind === 'event' && code === CAST_HIT) {
+            if (!playerId) return
             const caster = parameters[0] == null ? null : String(parameters[0])
-            if (playerId && caster === playerId) return
+            if (caster === playerId) return
             noteDamage(parameters[0])
         }
     }
