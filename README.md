@@ -12,6 +12,10 @@ A local map radar for Albion Online. It reads the game's Photon traffic and draw
 
 Other players' live positions are encrypted on the wire, so they are not drawn.
 
+### Auto gather
+
+The sidebar can walk your character to wood, rock, fiber, hide, or ore at or above a tier you choose, then click the node. It is off until you start it. Lock the camera first, press Aim, and change scale and angle until the cursor sits on the highlighted node. Gathering moves the mouse inside the Albion window.
+
 ### Run
 
 Install [Npcap](https://npcap.com/), then:

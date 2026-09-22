@@ -2,6 +2,7 @@ const http = require('http')
 const fs = require('fs')
 const path = require('path')
 const { createWorld } = require('./world')
+const { createGather } = require('./gather')
 
 const PORT = Number(process.env.PACKET_PORT) || 4789
 const PAGE = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'))
@@ -20,6 +21,23 @@ function send(event, data) {
 }
 
 const world = createWorld(send)
+const gather = createGather(() => world.snapshot(), send)
+
+function readJson(req) {
+    return new Promise((resolve, reject) => {
+        const chunks = []
+        req.on('data', (chunk) => chunks.push(chunk))
+        req.on('end', () => {
+            try {
+                const text = Buffer.concat(chunks).toString()
+                resolve(text ? JSON.parse(text) : {})
+            } catch (error) {
+                reject(error)
+            }
+        })
+        req.on('error', reject)
+    })
+}
 
 function startRadar() {
     const server = http.createServer((req, res) => {
@@ -33,7 +51,7 @@ function startRadar() {
 
         if (req.method === 'GET' && url.pathname === '/api/state') {
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' })
-            res.end(JSON.stringify(world.snapshot()))
+            res.end(JSON.stringify({ ...world.snapshot(), gather: gather.publicState() }))
             return
         }
 
@@ -53,6 +71,25 @@ function startRadar() {
             world.clear()
             res.writeHead(204)
             res.end()
+            return
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/gather') {
+            readJson(req).then((body) => {
+                const next = gather.configure(body)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify(next))
+            }).catch(() => {
+                res.writeHead(400)
+                res.end()
+            })
+            return
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/gather/aim') {
+            const result = gather.aim()
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(result))
             return
         }
 

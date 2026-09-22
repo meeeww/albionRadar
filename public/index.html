@@ -56,6 +56,12 @@
   .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
   #list { margin: 0; padding: 0; list-style: none; }
   #list li { margin: 5px 0; font-variant-numeric: tabular-nums; }
+  .gather { display: grid; gap: 8px; }
+  .types { display: flex; flex-wrap: wrap; gap: 8px 12px; }
+  label { display: flex; align-items: center; gap: 6px; }
+  input[type="number"] { width: 72px; background: #12140f; color: inherit; border: 1px solid #3a4030; border-radius: 6px; padding: 4px 6px; }
+  #gather-status { margin: 0; color: #e2c56a; }
+  .row { display: flex; gap: 8px; align-items: center; }
   .resource { color: #8fce6a; }
   .mob { color: #e06b6b; }
   .chest { color: #e2c56a; }
@@ -95,6 +101,26 @@
     <li><span class="swatch" style="background:#e39b54"></span>Dungeon</li>
     <li><span class="swatch" style="background:#b388ff;border-radius:50%"></span>Mist</li>
   </ul>
+  <h2>Auto gather</h2>
+  <div class="gather">
+    <p id="gather-status">Off. Choose what to pick up, aim the cursor, then start.</p>
+    <div class="types">
+      <label><input type="checkbox" data-type="wood" checked>Wood</label>
+      <label><input type="checkbox" data-type="rock" checked>Rock</label>
+      <label><input type="checkbox" data-type="fiber" checked>Fiber</label>
+      <label><input type="checkbox" data-type="hide" checked>Hide</label>
+      <label><input type="checkbox" data-type="ore" checked>Ore</label>
+    </div>
+    <div class="row">
+      <label>Tier <input id="min-tier" type="number" min="1" max="8" value="1"></label>
+      <label>Scale <input id="scale" type="number" min="4" max="40" value="14"></label>
+      <label>Angle <input id="angle" type="number" min="-180" max="180" value="0"></label>
+    </div>
+    <div class="row">
+      <button type="button" id="aim">Aim</button>
+      <button type="button" id="gather-toggle">Start gathering</button>
+    </div>
+  </div>
   <h2>Nearest</h2>
   <ul id="list"></ul>
 </aside>
@@ -103,6 +129,8 @@ const entities = new Map()
 let player = { x: null, y: null, destX: null, destY: null, map: '' }
 let filter = 'all'
 let radius = Number(localStorage.getItem('radar-radius')) || 50
+let gatherTarget = null
+let gathering = false
 const canvas = document.getElementById('map')
 const ctx = canvas.getContext('2d')
 const list = document.getElementById('list')
@@ -218,6 +246,11 @@ function draw() {
     const py = cy - (entity.y - player.y) * scale
     ctx.fillStyle = colorOf(entity)
     ctx.beginPath()
+    if (entity.id === gatherTarget) {
+      ctx.strokeStyle = '#e2c56a'
+      ctx.lineWidth = 2
+      ctx.strokeRect(px - 8, py - 8, 16, 16)
+    }
     if (entity.kind === 'resource') ctx.fillRect(px - 4, py - 4, 8, 8)
     else if (entity.kind === 'chest' || entity.kind === 'dungeon') {
       ctx.moveTo(px, py - 6)
@@ -302,9 +335,63 @@ document.getElementById('clear').onclick = async () => {
 
 window.addEventListener('resize', resize)
 
+function gatherBody(enabled) {
+  const types = {}
+  document.querySelectorAll('[data-type]').forEach((input) => {
+    types[input.dataset.type] = input.checked
+  })
+  return {
+    enabled,
+    types,
+    minTier: Number(document.getElementById('min-tier').value),
+    scale: Number(document.getElementById('scale').value),
+    angle: Number(document.getElementById('angle').value),
+  }
+}
+
+function applyGather(data) {
+  if (!data) return
+  gathering = Boolean(data.enabled)
+  gatherTarget = data.targetId || null
+  document.getElementById('gather-toggle').textContent = gathering ? 'Stop gathering' : 'Start gathering'
+  document.getElementById('gather-status').textContent = data.detail || (gathering ? 'Looking for a node.' : 'Off. Choose what to pick up, aim the cursor, then start.')
+  draw()
+}
+
+async function saveGather(enabled) {
+  const res = await fetch('/api/gather', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(gatherBody(enabled)),
+  })
+  applyGather(await res.json())
+}
+
+document.getElementById('gather-toggle').onclick = () => saveGather(!gathering)
+document.getElementById('aim').onclick = async () => {
+  await saveGather(false)
+  const res = await fetch('/api/gather/aim', { method: 'POST' })
+  const data = await res.json()
+  document.getElementById('gather-status').textContent = data.detail || 'Aim failed.'
+  draw()
+}
+document.querySelectorAll('[data-type], #min-tier, #scale, #angle').forEach((input) => {
+  input.onchange = () => { if (gathering) saveGather(true) }
+})
+
 fetch('/api/state').then((res) => res.json()).then((data) => {
   player = data.player
   for (const entity of data.entities) entities.set(String(entity.id), entity)
+  if (data.gather) {
+    document.getElementById('min-tier').value = data.gather.minTier
+    document.getElementById('scale').value = data.gather.scale
+    document.getElementById('angle').value = data.gather.angle
+    for (const [name, on] of Object.entries(data.gather.types || {})) {
+      const input = document.querySelector('[data-type="' + name + '"]')
+      if (input) input.checked = on
+    }
+    applyGather(data.gather)
+  }
   resize()
 })
 
@@ -321,6 +408,7 @@ source.addEventListener('reset', (event) => {
   if (data.player) player = data.player
   draw()
 })
+source.addEventListener('gather', (event) => applyGather(JSON.parse(event.data)))
 </script>
 </body>
 </html>
