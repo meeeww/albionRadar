@@ -18,6 +18,7 @@ const SURROUND_LAPS = 2
 const MOB_PADDING = 9
 const HARVEST_PULSE = 52
 const HARVEST_END = 53
+const COMPASS = -Math.PI / 4
 
 function viewFrom(scaleOrSettings, angleDeg) {
     if (scaleOrSettings && typeof scaleOrSettings === 'object') return scaleOrSettings
@@ -31,7 +32,7 @@ function screenOffset(dx, dy, settings) {
             sy: dx * settings.view.yx + dy * settings.view.yy,
         }
     }
-    const angle = (settings.angle || 0) * Math.PI / 180
+    const angle = COMPASS + (settings.angle || 0) * Math.PI / 180
     const scale = settings.scale || 14
     return {
         sx: scale * (dx * Math.cos(angle) - dy * Math.sin(angle)),
@@ -184,7 +185,10 @@ function skipRow(skipped, id) {
 function rejection(entity, entities, settings, skipped, now, isBlocked) {
     if (entity.kind !== 'resource') return 'not a resource'
     if (entity.name !== 'resource' && !settings.types[entity.name]) return 'type is off'
-    if (entity.tier > 0 && entity.tier < settings.minTier) return `below tier ${settings.minTier}`
+    const maxTier = settings.maxTier || 8
+    if (entity.tier > 0 && (entity.tier < settings.minTier || entity.tier > maxTier)) {
+        return `outside T${settings.minTier}–T${maxTier}`
+    }
     const row = skipRow(skipped, entity.id)
     if (row && row.until > now) return row.why || 'skipped'
     if (settings.avoidMobs && mobOnNode(entity, entities)) return 'mob standing on it'
@@ -225,6 +229,7 @@ function createGather(snapshot, emit, terrain) {
         enabled: false,
         types: { wood: true, rock: true, fiber: true, hide: true, ore: true },
         minTier: 1,
+        maxTier: 8,
         scale: 14,
         angle: 0,
         automount: false,
@@ -272,6 +277,7 @@ function createGather(snapshot, emit, terrain) {
             enabled: settings.enabled,
             types: { ...settings.types },
             minTier: settings.minTier,
+            maxTier: settings.maxTier,
             scale: settings.scale,
             angle: settings.angle,
             automount: settings.automount,
@@ -297,6 +303,8 @@ function createGather(snapshot, emit, terrain) {
         }
         const tier = Number(next.minTier)
         if (Number.isFinite(tier)) settings.minTier = Math.max(1, Math.min(8, Math.round(tier)))
+        const maxTier = Number(next.maxTier)
+        if (Number.isFinite(maxTier)) settings.maxTier = Math.max(settings.minTier, Math.min(8, Math.round(maxTier)))
         const scale = Number(next.scale)
         if (Number.isFinite(scale)) settings.scale = Math.max(4, Math.min(80, scale))
         const angle = Number(next.angle)
@@ -768,9 +776,10 @@ function createGather(snapshot, emit, terrain) {
                 publish('walking', `No path around the dead zone to ${label(node)}. The way up has to be the ramp edge.`)
                 return
             }
-            step = terrain.pointAlong(routed, Math.min(away, 18))
+            step = terrain.pointAlong(routed, Math.min(away, away <= 8 ? away : 6))
         }
-        if (!step) step = steerPoint(player, node, view.entities, WALK_STEP, settings.avoidMobs)
+        if (!step) step = steerPoint(player, node, view.entities, away <= 8 ? away : 6, settings.avoidMobs)
+        if (away <= 8) step = { x: node.x, y: node.y }
         if (!step) {
             skipFor(node.id, 8000, 'mob blocking the path')
             state.targetId = null

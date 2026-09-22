@@ -117,7 +117,8 @@
       <label><input type="checkbox" data-type="ore" checked>Ore</label>
     </div>
     <div class="row">
-      <label>Tier <input id="min-tier" type="number" min="1" max="8" value="1"></label>
+      <label>From <input id="min-tier" type="number" min="1" max="8" value="1"></label>
+      <label>To <input id="max-tier" type="number" min="1" max="8" value="8"></label>
       <label>Scale <input id="scale" type="number" min="4" max="80" step="0.1" value="14"></label>
       <label>Angle <input id="angle" type="number" min="-180" max="180" value="0"></label>
     </div>
@@ -247,26 +248,30 @@ function draw() {
   ctx.stroke()
 
   const scale = ring / radius
+  const compass = -Math.PI / 4
+  const compassCos = Math.cos(compass)
+  const compassSin = Math.sin(compass)
+  function worldToScreen(x, y) {
+    const dx = x - player.x
+    const dy = y - player.y
+    const rx = dx * compassCos - dy * compassSin
+    const ry = dx * compassSin + dy * compassCos
+    return { x: cx + rx * scale, y: cy - ry * scale }
+  }
   if (hasPlayer() && Number.isFinite(player.destX) && Number.isFinite(player.destY)) {
-    const dx = player.destX - player.x
-    const dy = player.destY - player.y
-    const length = Math.hypot(dx, dy)
+    const length = Math.hypot(player.destX - player.x, player.destY - player.y)
     if (length > 0.4) {
-      const tip = Math.min(length, radius) * scale
+      const tip = worldToScreen(
+        player.x + (player.destX - player.x) / length * Math.min(length, radius),
+        player.y + (player.destY - player.y) / length * Math.min(length, radius),
+      )
       ctx.strokeStyle = '#e7e1d1'
       ctx.globalAlpha = 0.45
       ctx.beginPath()
       ctx.moveTo(cx, cy)
-      ctx.lineTo(cx + (dx / length) * tip, cy - (dy / length) * tip)
+      ctx.lineTo(tip.x, tip.y)
       ctx.stroke()
       ctx.globalAlpha = 1
-    }
-  }
-
-  function worldToScreen(x, y) {
-    return {
-      x: cx + (x - player.x) * scale,
-      y: cy - (y - player.y) * scale,
     }
   }
   function traceZone(points, close) {
@@ -308,8 +313,9 @@ function draw() {
 
   const visible = shown().filter((entity) => distance(entity) <= radius * 1.02)
   for (const entity of visible) {
-    const px = cx + (entity.x - player.x) * scale
-    const py = cy - (entity.y - player.y) * scale
+    const spot = worldToScreen(entity.x, entity.y)
+    const px = spot.x
+    const py = spot.y
     ctx.fillStyle = colorOf(entity)
     ctx.beginPath()
     if (entity.id === gatherTarget) {
@@ -410,6 +416,7 @@ function gatherBody(enabled, useManual) {
     enabled,
     types,
     minTier: Number(document.getElementById('min-tier').value),
+    maxTier: Number(document.getElementById('max-tier').value),
     scale: Number(document.getElementById('scale').value),
     angle: Number(document.getElementById('angle').value),
     automount: document.getElementById('automount').checked,
@@ -495,6 +502,7 @@ fetch('/api/state').then((res) => res.json()).then((data) => {
   if (data.terrain) showZones(data.terrain)
   if (data.gather) {
     document.getElementById('min-tier').value = data.gather.minTier
+    document.getElementById('max-tier').value = data.gather.maxTier || 8
     document.getElementById('scale').value = data.gather.scale
     document.getElementById('angle').value = data.gather.angle
     document.getElementById('automount').checked = Boolean(data.gather.automount)
@@ -542,9 +550,14 @@ function screenToWorld(event) {
   const localX = (event.clientX - box.left) * size / box.width
   const localY = (event.clientY - box.top) * size / box.height
   const scale = (size / 2 - 28) / radius
+  const compass = -Math.PI / 4
+  const compassCos = Math.cos(compass)
+  const compassSin = Math.sin(compass)
+  const rx = (localX - size / 2) / scale
+  const ry = -(localY - size / 2) / scale
   return {
-    x: player.x + (localX - size / 2) / scale,
-    y: player.y - (localY - size / 2) / scale,
+    x: player.x + rx * compassCos + ry * compassSin,
+    y: player.y - rx * compassSin + ry * compassCos,
   }
 }
 
