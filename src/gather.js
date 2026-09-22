@@ -19,6 +19,22 @@ const MOB_PADDING = 9
 const HARVEST_PULSE = 52
 const HARVEST_END = 53
 const COMPASS = -Math.PI / 4
+const TUNE = [
+    { scale: 1, angle: 12 },
+    { scale: 1, angle: -12 },
+    { scale: 1, angle: 24 },
+    { scale: 1, angle: -24 },
+    { scale: 0.8, angle: 0 },
+    { scale: 1.25, angle: 0 },
+    { scale: 0.8, angle: 18 },
+    { scale: 0.8, angle: -18 },
+    { scale: 1.25, angle: 18 },
+    { scale: 1.25, angle: -18 },
+    { scale: 1.5, angle: 0 },
+    { scale: 0.65, angle: 0 },
+    { scale: 1, angle: 40 },
+    { scale: 1, angle: -40 },
+]
 
 function viewFrom(scaleOrSettings, angleDeg) {
     if (scaleOrSettings && typeof scaleOrSettings === 'object') return scaleOrSettings
@@ -260,6 +276,8 @@ function createGather(snapshot, emit, terrain) {
     let harvestSeenAt = 0
     let harvestEndedAt = 0
     let harvestClicks = 0
+    let tuneBase = null
+    let tuneIndex = 0
     let playerId = null
     let fleeStage = null
     let fleeUntil = 0
@@ -570,6 +588,18 @@ function createGather(snapshot, emit, terrain) {
         return now - anchorAt >= STUCK_MS
     }
 
+    function retune() {
+        if (!tuneBase) tuneBase = { scale: settings.scale || 14, angle: settings.angle || 0 }
+        settings.view = null
+        const step = TUNE[tuneIndex % TUNE.length]
+        tuneIndex += 1
+        settings.scale = Math.max(4, Math.min(80, Math.round(tuneBase.scale * step.scale * 10) / 10))
+        let angle = tuneBase.angle + step.angle
+        while (angle > 180) angle -= 360
+        while (angle < -180) angle += 360
+        settings.angle = angle
+    }
+
     function skipFor(id, ms, why) {
         skipped.set(id, { until: Date.now() + ms, why })
     }
@@ -717,28 +747,29 @@ function createGather(snapshot, emit, terrain) {
                 return
             }
             const started = harvestStarted(phaseSince)
+            if (started && tuneIndex > 0) {
+                tuneBase = { scale: settings.scale, angle: settings.angle }
+                tuneIndex = 0
+                publish('tuned', `Harvest registered. Keeping scale ${settings.scale} and angle ${settings.angle}.`)
+            }
             const stalled = started && now - harvestSeenAt > HARVEST_STALL_MS
             const missed = !started && now - lastClick >= HARVEST_RETRY_MS
             if ((missed || stalled || harvestClicks === 0) && (harvestClicks === 0 || now - lastClick >= HARVEST_RETRY_MS)) {
-                if (harvestClicks > 6 || (harvestClicks > 0 && now - phaseSince > HARVEST_GIVE_UP_MS)) {
+                if (harvestClicks > TUNE.length) {
                     skipFor(node.id, SKIP_MS, 'harvest did not start')
                     state.targetId = null
                     phase = 'idle'
                     noteLines(player, view.entities, null)
-                    publish('searching', `Skipped ${label(node)}. The harvest never registered.`)
+                    publish('searching', `Skipped ${label(node)}. Tried ${TUNE.length} aim corrections and none started the harvest.`)
                     return
                 }
+                if (harvestClicks > 0 && !started) retune()
                 const point = projectPoint(player, node, rect, settings)
-                const nearCenter = Math.hypot(point.x - point.cx, point.y - point.cy) < 280
-                if (!nearCenter) {
-                    publish('waiting', 'Close to the node, but the click point is off-center. Capture two nodes in different directions.')
-                    return
-                }
                 harvestClicks += 1
                 if (!clickAt(point, rect)) return
-                publish('harvesting', harvestClicks === 1
+                publish(harvestClicks === 1 ? 'harvesting' : 'tuned', harvestClicks === 1
                     ? `Harvesting ${label(node)}.`
-                    : `Click did not start the harvest on ${label(node)}. Trying again.`)
+                    : `No harvest yet. Clicking again at scale ${settings.scale}, angle ${settings.angle}.`)
                 return
             }
             publish('harvesting', started
@@ -779,7 +810,7 @@ function createGather(snapshot, emit, terrain) {
             step = terrain.pointAlong(routed, Math.min(away, away <= 8 ? away : 6))
         }
         if (!step) step = steerPoint(player, node, view.entities, away <= 8 ? away : 6, settings.avoidMobs)
-        if (away <= 8) step = { x: node.x, y: node.y }
+        if (!step && away <= 8) step = { x: node.x, y: node.y }
         if (!step) {
             skipFor(node.id, 8000, 'mob blocking the path')
             state.targetId = null

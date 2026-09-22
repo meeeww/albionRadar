@@ -434,7 +434,7 @@ function applyGather(data) {
     document.getElementById('gather-status').textContent = data.detail || (gathering ? 'Looking for a node.' : 'Off. Choose what to pick up, aim the cursor, then start.')
   }
   if (data.lines) document.getElementById('report').textContent = data.lines.join('\n')
-  if (data.status === 'calibrated') {
+  if (data.status === 'calibrated' || data.status === 'tuned') {
     document.getElementById('scale').value = data.scale
     document.getElementById('angle').value = data.angle
   }
@@ -489,7 +489,7 @@ document.getElementById('aim').onclick = async () => {
   document.getElementById('gather-status').textContent = data.detail || 'Aim failed.'
   draw()
 }
-document.querySelectorAll('[data-type], #min-tier, #automount, #avoid-mobs').forEach((input) => {
+document.querySelectorAll('[data-type], #min-tier, #max-tier, #automount, #avoid-mobs').forEach((input) => {
   input.onchange = () => { if (gathering) saveGather(true) }
 })
 document.querySelectorAll('#scale, #angle').forEach((input) => {
