@@ -3,6 +3,7 @@ const fs = require('fs')
 const path = require('path')
 const { createWorld } = require('./world')
 const { createGather } = require('./gather')
+const { createTerrain } = require('./terrain')
 
 const PORT = Number(process.env.PACKET_PORT) || 4789
 const PAGE = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'))
@@ -21,7 +22,8 @@ function send(event, data) {
 }
 
 const world = createWorld(send)
-const gather = createGather(() => world.snapshot(), send)
+const terrain = createTerrain(path.join(__dirname, '..', 'data', 'terrain.json'), send)
+const gather = createGather(() => world.snapshot(), send, terrain)
 
 function readJson(req) {
     return new Promise((resolve, reject) => {
@@ -51,7 +53,12 @@ function startRadar() {
 
         if (req.method === 'GET' && url.pathname === '/api/state') {
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' })
-            res.end(JSON.stringify({ ...world.snapshot(), gather: gather.publicState() }))
+            const snap = world.snapshot()
+            res.end(JSON.stringify({
+                ...snap,
+                gather: gather.publicState(),
+                terrain: terrain.around(snap.player.map, snap.player, 90),
+            }))
             return
         }
 
@@ -104,6 +111,20 @@ function startRadar() {
             const result = gather.calibrate()
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(result))
+            return
+        }
+
+        if (req.method === 'POST' && (url.pathname === '/api/terrain/reprofile' || url.pathname === '/api/terrain/open')) {
+            readJson(req).then((body) => {
+                const result = url.pathname.endsWith('/open')
+                    ? gather.allowGround(body.x, body.y)
+                    : gather.reprofile(body.x, body.y)
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify(result))
+            }).catch(() => {
+                res.writeHead(400)
+                res.end()
+            })
             return
         }
 

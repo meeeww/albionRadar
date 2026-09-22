@@ -61,6 +61,9 @@
   label { display: flex; align-items: center; gap: 6px; }
   input[type="number"] { width: 72px; background: #12140f; color: inherit; border: 1px solid #3a4030; border-radius: 6px; padding: 4px 6px; }
   #gather-status { margin: 0; color: #e2c56a; }
+  #report { margin: 8px 0 0; white-space: pre-wrap; font: 12px/1.45 ui-monospace, monospace; color: #d9d3c3; }
+  #cell-actions { display: flex; gap: 8px; }
+  #cell-actions[hidden] { display: none; }
   .row { display: flex; gap: 8px; align-items: center; }
   .resource { color: #8fce6a; }
   .mob { color: #e06b6b; }
@@ -100,6 +103,8 @@
     <li><span class="swatch" style="background:#e2c56a"></span>Chest</li>
     <li><span class="swatch" style="background:#e39b54"></span>Dungeon</li>
     <li><span class="swatch" style="background:#b388ff;border-radius:50%"></span>Mist</li>
+    <li><span class="swatch" style="background:#d68c28"></span>Not profiled</li>
+    <li><span class="swatch" style="background:#c4463c"></span>Blocked ground</li>
   </ul>
   <h2>Auto gather</h2>
   <div class="gather">
@@ -124,6 +129,12 @@
     </div>
     <label><input id="automount" type="checkbox"> Mount with A after each harvest</label>
     <label><input id="avoid-mobs" type="checkbox" checked> Avoid mobs</label>
+    <label><input id="survey" type="checkbox"> Map the ground</label>
+    <pre id="report"></pre>
+    <div id="cell-actions" hidden>
+      <button type="button" id="reprofile">Re-profile this spot</button>
+      <button type="button" id="clear-block">Good to go</button>
+    </div>
     <div class="row">
       <button type="button" id="gather-toggle">Start gathering</button>
     </div>
@@ -139,6 +150,8 @@ let radius = Number(localStorage.getItem('radar-radius')) || 50
 let gatherTarget = null
 let gathering = false
 let captureWait = false
+let ground = { cell: 5, blocked: [], open: [] }
+let selectedCell = null
 const canvas = document.getElementById('map')
 const ctx = canvas.getContext('2d')
 const list = document.getElementById('list')
@@ -245,6 +258,28 @@ function draw() {
       ctx.lineTo(cx + (dx / length) * tip, cy - (dy / length) * tip)
       ctx.stroke()
       ctx.globalAlpha = 1
+    }
+  }
+
+  if (hasPlayer()) {
+    const step = ground.cell || 5
+    const gx0 = Math.round((player.x - radius) / step)
+    const gx1 = Math.round((player.x + radius) / step)
+    const gy0 = Math.round((player.y - radius) / step)
+    const gy1 = Math.round((player.y + radius) / step)
+    const openKeys = new Set(ground.open.map((cell) => Math.round(cell.x / step) + ',' + Math.round(cell.y / step)))
+    const blockedKeys = new Set(ground.blocked.map((cell) => Math.round(cell.x / step) + ',' + Math.round(cell.y / step)))
+    for (let gx = gx0; gx <= gx1; gx++) {
+      for (let gy = gy0; gy <= gy1; gy++) {
+        const key = gx + ',' + gy
+        if (openKeys.has(key)) continue
+        const blocked = blockedKeys.has(key)
+        const px = cx + (gx * step - player.x) * scale
+        const py = cy - (gy * step - player.y) * scale
+        const size = step * scale
+        ctx.fillStyle = blocked ? 'rgba(196, 70, 60, 0.58)' : 'rgba(214, 140, 40, 0.28)'
+        ctx.fillRect(px - size / 2, py - size / 2, size, size)
+      }
     }
   }
 
@@ -356,6 +391,7 @@ function gatherBody(enabled, useManual) {
     angle: Number(document.getElementById('angle').value),
     automount: document.getElementById('automount').checked,
     avoidMobs: document.getElementById('avoid-mobs').checked,
+    survey: document.getElementById('survey').checked,
     useManual,
   }
 }
@@ -368,6 +404,7 @@ function applyGather(data) {
   if (!captureWait) {
     document.getElementById('gather-status').textContent = data.detail || (gathering ? 'Looking for a node.' : 'Off. Choose what to pick up, aim the cursor, then start.')
   }
+  if (data.lines) document.getElementById('report').textContent = data.lines.join('\n')
   if (data.status === 'calibrated') {
     document.getElementById('scale').value = data.scale
     document.getElementById('angle').value = data.angle
@@ -426,6 +463,7 @@ document.getElementById('aim').onclick = async () => {
 document.querySelectorAll('[data-type], #min-tier, #automount, #avoid-mobs').forEach((input) => {
   input.onchange = () => { if (gathering) saveGather(true) }
 })
+document.getElementById('survey').onchange = () => saveGather(gathering)
 document.querySelectorAll('#scale, #angle').forEach((input) => {
   input.onchange = () => saveGather(gathering, true)
 })
@@ -433,12 +471,14 @@ document.querySelectorAll('#scale, #angle').forEach((input) => {
 fetch('/api/state').then((res) => res.json()).then((data) => {
   player = data.player
   for (const entity of data.entities) entities.set(String(entity.id), entity)
+  if (data.terrain) ground = data.terrain
   if (data.gather) {
     document.getElementById('min-tier').value = data.gather.minTier
     document.getElementById('scale').value = data.gather.scale
     document.getElementById('angle').value = data.gather.angle
     document.getElementById('automount').checked = Boolean(data.gather.automount)
     document.getElementById('avoid-mobs').checked = data.gather.avoidMobs !== false
+    document.getElementById('survey').checked = Boolean(data.gather.survey)
     for (const [name, on] of Object.entries(data.gather.types || {})) {
       const input = document.querySelector('[data-type="' + name + '"]')
       if (input) input.checked = on
@@ -462,6 +502,43 @@ source.addEventListener('reset', (event) => {
   draw()
 })
 source.addEventListener('gather', (event) => applyGather(JSON.parse(event.data)))
+source.addEventListener('terrain', (event) => {
+  ground = JSON.parse(event.data)
+  draw()
+})
+
+canvas.onclick = (event) => {
+  if (!hasPlayer()) return
+  const box = canvas.getBoundingClientRect()
+  const size = canvas.clientWidth
+  const localX = (event.clientX - box.left) * size / box.width
+  const localY = (event.clientY - box.top) * size / box.height
+  const ring = size / 2 - 28
+  const scale = ring / radius
+  const worldX = player.x + (localX - size / 2) / scale
+  const worldY = player.y - (localY - size / 2) / scale
+  const step = ground.cell || 5
+  const gx = Math.round(worldX / step) * step
+  const gy = Math.round(worldY / step) * step
+  const blocked = ground.blocked.some((cell) => Math.round(cell.x / step) === Math.round(gx / step) && Math.round(cell.y / step) === Math.round(gy / step))
+  selectedCell = { x: gx, y: gy }
+  const actions = document.getElementById('cell-actions')
+  actions.hidden = !blocked
+  if (!blocked) document.getElementById('gather-status').textContent = 'That spot is not marked blocked. Orange ground has not been profiled yet.'
+}
+
+async function postCell(path) {
+  if (!selectedCell) return
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(selectedCell),
+  })
+  applyGather(await res.json())
+  document.getElementById('cell-actions').hidden = true
+}
+document.getElementById('reprofile').onclick = () => postCell('/api/terrain/reprofile')
+document.getElementById('clear-block').onclick = () => postCell('/api/terrain/open')
 </script>
 </body>
 </html>

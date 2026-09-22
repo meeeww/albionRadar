@@ -172,15 +172,28 @@ function mobOnNode(node, entities) {
     return entities.some((entity) => entity.kind === 'mob' && distance(node, entity) < 6)
 }
 
+function skipRow(skipped, id) {
+    const row = skipped.get(id)
+    if (!row) return null
+    if (typeof row === 'object') return row
+    return { until: row, why: 'skipped' }
+}
+
+function rejection(entity, entities, settings, skipped, now) {
+    if (entity.kind !== 'resource') return 'not a resource'
+    if (entity.name !== 'resource' && !settings.types[entity.name]) return 'type is off'
+    if (entity.tier > 0 && entity.tier < settings.minTier) return `below tier ${settings.minTier}`
+    const row = skipRow(skipped, entity.id)
+    if (row && row.until > now) return row.why || 'skipped'
+    if (settings.avoidMobs && mobOnNode(entity, entities)) return 'mob standing on it'
+    return ''
+}
+
 function pickTarget(player, entities, settings, skipped, now) {
     let best = null
     let bestDistance = Infinity
     for (const entity of entities) {
-        if (entity.kind !== 'resource') continue
-        if (!settings.types[entity.name]) continue
-        if ((entity.tier || 0) < settings.minTier) continue
-        if ((skipped.get(entity.id) || 0) > now) continue
-        if (settings.avoidMobs && mobOnNode(entity, entities)) continue
+        if (rejection(entity, entities, settings, skipped, now)) continue
         const away = distance(player, entity)
         if (away < bestDistance) {
             best = entity
@@ -190,7 +203,21 @@ function pickTarget(player, entities, settings, skipped, now) {
     return best
 }
 
-function createGather(snapshot, emit) {
+function nearbyNotes(player, entities, settings, skipped, now, chosenId) {
+    return entities
+        .filter((entity) => entity.kind === 'resource')
+        .map((entity) => ({
+            away: distance(player, entity),
+            text: `${distance(player, entity).toFixed(0)} m  T${entity.tier || '?'} ${entity.name}`,
+            why: rejection(entity, entities, settings, skipped, now),
+            id: entity.id,
+        }))
+        .sort((a, b) => a.away - b.away)
+        .slice(0, 5)
+        .map((row) => row.text + (row.id === chosenId ? '  ← this one' : row.why ? `  — ${row.why}` : ''))
+}
+
+function createGather(snapshot, emit, terrain) {
     const settings = {
         enabled: false,
         types: { wood: true, rock: true, fiber: true, hide: true, ore: true },
@@ -199,12 +226,15 @@ function createGather(snapshot, emit) {
         angle: 0,
         automount: false,
         avoidMobs: true,
+        survey: false,
         view: null,
     }
     const state = {
         status: 'off',
         targetId: null,
         detail: '',
+        lines: [],
+        motion: '',
     }
     const skipped = new Map()
     let phase = 'idle'
@@ -222,6 +252,8 @@ function createGather(snapshot, emit) {
     let harvestSeenAt = 0
     let harvestEndedAt = 0
     let harvestClicks = 0
+    let profile = null
+    let surveyProbe = null
 
     function publish(status, detail) {
         if (state.status === status && state.detail === detail) return
@@ -239,10 +271,14 @@ function createGather(snapshot, emit) {
             angle: settings.angle,
             automount: settings.automount,
             avoidMobs: settings.avoidMobs,
+            survey: settings.survey,
             isometric: Boolean(settings.view),
             status: state.status,
             targetId: state.targetId,
             detail: state.detail,
+            lines: state.lines,
+            motion: state.motion,
+            terrain: terrain ? terrain.counts(snapshot().player.map) : { blocked: 0, open: 0 },
         }
     }
 
@@ -262,6 +298,7 @@ function createGather(snapshot, emit) {
         if (Number.isFinite(angle)) settings.angle = Math.max(-180, Math.min(180, angle))
         if (typeof next.automount === 'boolean') settings.automount = next.automount
         if (typeof next.avoidMobs === 'boolean') settings.avoidMobs = next.avoidMobs
+        if (typeof next.survey === 'boolean') settings.survey = next.survey
         if (next.useManual) settings.view = null
         if (!settings.enabled) {
             phase = 'idle'
@@ -440,6 +477,8 @@ function createGather(snapshot, emit) {
         }
         const moved = Math.hypot(player.x - anchor.x, player.y - anchor.y)
         if (moved >= STUCK_MOVE) {
+            if (terrain) terrain.markSegment(player.map, anchor.x, anchor.y, player.x, player.y)
+            state.motion = `Last move ${moved.toFixed(1)} m`
             anchor = { x: player.x, y: player.y }
             anchorAt = now
             return false
@@ -447,8 +486,126 @@ function createGather(snapshot, emit) {
         return now - anchorAt >= STUCK_MS
     }
 
+    function beginProfile(player, node, now) {
+        phase = 'profile'
+        phaseSince = now
+        const into = Math.atan2(node.y - player.y, node.x - player.x)
+        profile = { angle: into + Math.PI / 2, steps: 0, origin: { x: player.x, y: player.y } }
+        anchor = { x: player.x, y: player.y }
+        anchorAt = now
+    }
+
+    function profileStep(player, node, rect, now) {
+        if (now - lastClick < 650) {
+            noteLines(player, snapshot().entities, node)
+            publish('profiling', `Profiling blocked ground near ${label(node)}. Step ${profile.steps}.`)
+            return
+        }
+        const moved = Math.hypot(player.x - anchor.x, player.y - anchor.y)
+        if (profile.steps > 0) {
+            const probed = {
+                x: anchor.x + Math.cos(profile.angle) * 5,
+                y: anchor.y + Math.sin(profile.angle) * 5,
+            }
+            if (moved < STUCK_MOVE) {
+                if (terrain) terrain.mark(player.map, probed.x, probed.y, 'blocked')
+                state.motion = 'Probe did not move. Marked that cell blocked.'
+                profile.angle += Math.PI / 3
+            } else {
+                if (terrain) terrain.markSegment(player.map, anchor.x, anchor.y, player.x, player.y)
+                state.motion = `Probe moved ${moved.toFixed(1)} m. Edge is open there.`
+            }
+        }
+        profile.steps += 1
+        const back = Math.hypot(player.x - profile.origin.x, player.y - profile.origin.y)
+        if (profile.steps > 16 || (profile.steps > 6 && back < 4)) {
+            phase = 'approach'
+            anchor = { x: player.x, y: player.y }
+            anchorAt = now
+            noteLines(player, snapshot().entities, node)
+            publish('walking', `Profile finished around ${label(node)}. Walking again.`)
+            return
+        }
+        anchor = { x: player.x, y: player.y }
+        const dest = {
+            x: player.x + Math.cos(profile.angle) * 5,
+            y: player.y + Math.sin(profile.angle) * 5,
+        }
+        const point = projectPoint(player, dest, rect, settings)
+        if (!clickAt(point, rect)) return
+        noteLines(player, snapshot().entities, node)
+        publish('profiling', `Profiling the obstacle, step ${profile.steps}. ${state.motion}`)
+    }
+
+    function surveyStep(player, rect, now) {
+        if (surveyProbe && now - surveyProbe.at < 700) {
+            noteLines(player, snapshot().entities, null)
+            publish('survey', `Probing ${surveyProbe.away.toFixed(0)} m away. Waiting to see if the character moves.`)
+            return
+        }
+        if (surveyProbe) {
+            const moved = Math.hypot(player.x - surveyProbe.x, player.y - surveyProbe.y)
+            if (moved < STUCK_MOVE) {
+                terrain.mark(player.map, surveyProbe.destX, surveyProbe.destY, 'blocked')
+                state.motion = `Did not move. Blocked at ${surveyProbe.destX.toFixed(0)}, ${surveyProbe.destY.toFixed(0)}.`
+            } else {
+                terrain.markSegment(player.map, surveyProbe.x, surveyProbe.y, player.x, player.y)
+                state.motion = `Moved ${moved.toFixed(1)} m. Marked that ground open.`
+            }
+            surveyProbe = null
+        }
+        const goal = terrain.nearestUnknown(player.map, player.x, player.y, 40)
+            || terrain.nearestUnknown(player.map, player.x, player.y, 75)
+        noteLines(player, snapshot().entities, null)
+        if (!goal) {
+            publish('survey', 'Ground around you is mapped. Walk to a new area, or stop mapping.')
+            return
+        }
+        const away = Math.hypot(goal.x - player.x, goal.y - player.y)
+        const step = Math.min(6, away)
+        const dest = {
+            x: player.x + ((goal.x - player.x) / away) * step,
+            y: player.y + ((goal.y - player.y) / away) * step,
+        }
+        surveyProbe = { x: player.x, y: player.y, destX: goal.x, destY: goal.y, at: now, away }
+        const point = projectPoint(player, dest, rect, settings)
+        if (!clickAt(point, rect)) return
+        publish('survey', `Mapping unknown ground ${away.toFixed(0)} m away. ${state.motion}`)
+    }
+
+    function skipFor(id, ms, why) {
+        skipped.set(id, { until: Date.now() + ms, why })
+    }
+
+    function noteLines(player, entities, chosen) {
+        const counts = terrain ? terrain.counts(player.map) : { blocked: 0, open: 0 }
+        state.lines = [
+            `You ${player.x.toFixed(1)}, ${player.y.toFixed(1)}${player.map ? `  ${player.map}` : ''}`,
+            state.motion,
+            `Mapped ground: ${counts.open} open, ${counts.blocked} blocked`,
+            ...nearbyNotes(player, entities, settings, skipped, Date.now(), chosen && chosen.id),
+        ].filter(Boolean)
+    }
+
+    function reprofile(x, y) {
+        const map = snapshot().player.map
+        if (terrain) terrain.mark(map, x, y, 'unknown')
+        settings.survey = true
+        settings.enabled = true
+        surveyProbe = null
+        publish('survey', `Re-profiling ground near ${Number(x).toFixed(0)}, ${Number(y).toFixed(0)}.`)
+        return publicState()
+    }
+
+    function allowGround(x, y) {
+        const map = snapshot().player.map
+        if (terrain) terrain.mark(map, x, y, 'open')
+        publish('survey', `Marked ${Number(x).toFixed(0)}, ${Number(y).toFixed(0)} as open ground.`)
+        return publicState()
+    }
+
     function tick() {
-        if (busy || !settings.enabled) return
+        if (busy || (!settings.enabled && !settings.survey)) return
         busy = true
         try {
             step()
@@ -466,12 +623,18 @@ function createGather(snapshot, emit) {
             return
         }
 
+        const nearest = pickTarget(player, view.entities, settings, skipped, now)
+        if (phase !== 'harvest' && nearest && nearest.id !== state.targetId) {
+            const current = view.entities.find((entity) => entity.id === state.targetId)
+            const currentAway = current ? distance(player, current) : Infinity
+            if (!current || distance(player, nearest) + 2 < currentAway) {
+                state.targetId = nearest.id
+                if (phase === 'profile') phase = 'approach'
+            }
+        }
+
         const target = view.entities.find((entity) => entity.id === state.targetId)
-        const stillWanted = target
-            && target.kind === 'resource'
-            && settings.types[target.name]
-            && (target.tier || 0) >= settings.minTier
-            && (skipped.get(target.id) || 0) <= now
+        const stillWanted = target && !rejection(target, view.entities, settings, skipped, now)
 
         if (!stillWanted) {
             if (phase === 'harvest' && settings.automount) pressMount()
@@ -481,15 +644,16 @@ function createGather(snapshot, emit) {
             phaseSince = now
             harvestSize = null
             resetRoute()
-            if (!next) {
+            if (!next && !(settings.survey && terrain)) {
+                noteLines(player, view.entities, null)
                 publish('searching', 'No matching resource in range.')
                 return
             }
         }
 
         const node = view.entities.find((entity) => entity.id === state.targetId)
-        if (!node) return
-        const away = distance(player, node)
+        if (!node && !(settings.survey && terrain)) return
+        const away = node ? distance(player, node) : Infinity
         const win = Window.getByTitle('Albion Online Client')
         const rect = win && win.getDimensions()
         if (!rect) {
@@ -498,6 +662,11 @@ function createGather(snapshot, emit) {
         }
         if (!mouse()) {
             publish('waiting', 'Mouse control is not installed. Run npm install in albionRadar.')
+            return
+        }
+
+        if (settings.survey && terrain) {
+            surveyStep(player, rect, now)
             return
         }
 
@@ -510,7 +679,7 @@ function createGather(snapshot, emit) {
             }
             const depleted = node.size != null && harvestSize != null && node.size < harvestSize
             if (depleted || harvestFinished(phaseSince)) {
-                skipped.set(node.id, now + 5000)
+                skipFor(node.id, 5000, 'just harvested')
                 if (settings.automount) pressMount()
                 state.targetId = null
                 phase = 'idle'
@@ -523,9 +692,10 @@ function createGather(snapshot, emit) {
             const missed = !started && now - lastClick >= HARVEST_RETRY_MS
             if ((missed || stalled || harvestClicks === 0) && (harvestClicks === 0 || now - lastClick >= HARVEST_RETRY_MS)) {
                 if (harvestClicks > 6 || (harvestClicks > 0 && now - phaseSince > HARVEST_GIVE_UP_MS)) {
-                    skipped.set(node.id, now + SKIP_MS)
+                    skipFor(node.id, SKIP_MS, 'harvest did not start')
                     state.targetId = null
                     phase = 'idle'
+                    noteLines(player, view.entities, null)
                     publish('searching', `Skipped ${label(node)}. The harvest never registered.`)
                     return
                 }
@@ -548,81 +718,55 @@ function createGather(snapshot, emit) {
             return
         }
 
-        if (phase !== 'approach' && phase !== 'surround') {
+        if (phase !== 'approach' && phase !== 'profile') {
             phase = 'approach'
             phaseSince = now
             resetRoute()
         }
+        if (phase === 'profile') {
+            profileStep(player, node, rect, now)
+            return
+        }
         if (now - lastClick < CLICK_MS) {
-            publish(
-                phase === 'surround' ? 'surrounding' : 'walking',
-                phase === 'surround'
-                    ? `Moving around ${label(node)} to get unstuck.`
-                    : `Walking to ${label(node)}, ${away.toFixed(0)} m away.`,
-            )
+            noteLines(player, view.entities, node)
+            publish('walking', `Walking to ${label(node)}, ${away.toFixed(0)} m away.`)
             return
         }
 
-        if (phase === 'approach' && stuckTooLong(player, now)) {
-            beginSurround(player, node, now)
+        if (stuckTooLong(player, now)) {
+            const blockedX = player.x + ((node.x - player.x) / away) * 5
+            const blockedY = player.y + ((node.y - player.y) / away) * 5
+            if (terrain) terrain.mark(player.map, blockedX, blockedY, 'blocked')
+            beginProfile(player, node, now)
+            noteLines(player, view.entities, node)
+            publish('profiling', `Position did not change. Profiling the blocked ground in front of ${label(node)}.`)
+            return
         }
 
-        if (phase === 'surround') {
-            if (surroundStep >= SURROUND_STEPS) {
-                surroundStep = 0
-                surroundLaps += 1
-                const closer = distance(player, node) + 2 < surroundStartDistance
-                if (closer) {
-                    phase = 'approach'
-                    phaseSince = now
-                    stuckClicks = 0
-                    anchor = { x: player.x, y: player.y }
-                    publish('walking', `Clear of the block. Walking to ${label(node)}.`)
-                } else if (surroundLaps >= SURROUND_LAPS) {
-                    skipped.set(node.id, now + SKIP_MS)
-                    state.targetId = null
-                    phase = 'idle'
-                    resetRoute()
-                    publish('searching', `Could not reach ${label(node)} after moving around it.`)
-                    return
-                } else {
-                    surroundStartDistance = distance(player, node)
-                    publish('surrounding', `Still blocked. Circling ${label(node)} again.`)
-                }
-            }
-            if (phase === 'surround') {
-                const point = projectPoint(
-                    player,
-                    surroundPoint(player, node, surroundStep, SURROUND_RADIUS),
-                    rect,
-                    settings,
-                )
-                surroundStep += 1
-                if (!clickAt(point, rect)) return
-                publish('surrounding', `Moving around ${label(node)} to get unstuck.`)
-                return
-            }
-        }
-
-        const step = steerPoint(player, node, view.entities, WALK_STEP, settings.avoidMobs)
+        const routed = terrain && terrain.route(player.map, player, node)
+        let step = routed && routed.length > 1 ? terrain.pointAlong(routed, Math.min(away, 18)) : null
+        if (!step) step = steerPoint(player, node, view.entities, WALK_STEP, settings.avoidMobs)
         if (!step) {
-            beginSurround(player, node, now)
-            publish('surrounding', `A mob is blocking the way to ${label(node)}. Moving around.`)
+            skipFor(node.id, 8000, 'mob blocking the path')
+            state.targetId = null
+            phase = 'approach'
+            noteLines(player, view.entities, null)
+            publish('walking', `Mob blocking ${label(node)} at ${away.toFixed(0)} m. Choosing another node.`)
             return
         }
         const point = projectPoint(player, step, rect, settings)
         if (!clickAt(point, rect)) return
-        const bending = Math.hypot(step.x - node.x, step.y - node.y) > 1
-            && Math.abs(Math.atan2(step.y - player.y, step.x - player.x) - Math.atan2(node.y - player.y, node.x - player.x)) > 0.2
-        publish('walking', bending
-            ? `Walking around a mob toward ${label(node)}, ${away.toFixed(0)} m away.`
+        const bend = Math.abs(Math.atan2(step.y - player.y, step.x - player.x) - Math.atan2(node.y - player.y, node.x - player.x))
+        noteLines(player, view.entities, node)
+        publish('walking', bend > 0.35
+            ? `Stepping around a mob toward ${label(node)}, ${away.toFixed(0)} m away.`
             : `Walking to ${label(node)}, ${away.toFixed(0)} m away.`)
     }
 
     const timer = setInterval(tick, 120)
     if (typeof timer.unref === 'function') timer.unref()
 
-    return { configure, aim, markNode, calibrate, observe, publicState }
+    return { configure, aim, markNode, calibrate, observe, reprofile, allowGround, publicState }
 }
 
 module.exports = {
