@@ -1,7 +1,7 @@
 const fs = require('fs')
 const path = require('path')
 
-const CELL = 5
+const CELL = 2
 
 function createTerrain(filePath, emit) {
     const maps = {}
@@ -11,6 +11,7 @@ function createTerrain(filePath, emit) {
     function load() {
         try {
             const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+            if (parsed.cell && parsed.cell !== CELL) return
             for (const [map, body] of Object.entries(parsed.maps || {})) {
                 maps[map] = {
                     blocked: new Set(body.blocked || []),
@@ -141,7 +142,7 @@ function createTerrain(filePath, emit) {
         const came = new Map()
         const walked = new Map([[start, 0]])
         let seen = 0
-        while (open.size && seen < 400) {
+        while (open.size && seen < 900) {
             seen += 1
             let current = null
             let best = Infinity

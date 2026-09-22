@@ -9,6 +9,8 @@ const HARVEST_RETRY_MS = 900
 const HARVEST_STALL_MS = 6500
 const SKIP_MS = 45000
 const STUCK_MOVE = 1.5
+const PROBE = 2
+const PROBE_MOVE = 0.8
 const STUCK_MS = 2800
 const SURROUND_RADIUS = 6
 const SURROUND_STEPS = 8
@@ -254,6 +256,7 @@ function createGather(snapshot, emit, terrain) {
     let harvestClicks = 0
     let profile = null
     let surveyProbe = null
+    let edge = null
 
     function publish(status, detail) {
         if (state.status === status && state.detail === detail) return
@@ -486,91 +489,123 @@ function createGather(snapshot, emit, terrain) {
         return now - anchorAt >= STUCK_MS
     }
 
-    function beginProfile(player, node, now) {
-        phase = 'profile'
-        phaseSince = now
-        const into = Math.atan2(node.y - player.y, node.x - player.x)
-        profile = { angle: into + Math.PI / 2, steps: 0, origin: { x: player.x, y: player.y } }
-        anchor = { x: player.x, y: player.y }
-        anchorAt = now
+    function stepToward(player, angle, distance) {
+        return {
+            x: player.x + Math.cos(angle) * distance,
+            y: player.y + Math.sin(angle) * distance,
+        }
     }
 
-    function profileStep(player, node, rect, now) {
-        if (now - lastClick < 650) {
-            noteLines(player, snapshot().entities, node)
-            publish('profiling', `Profiling blocked ground near ${label(node)}. Step ${profile.steps}.`)
+    function beginEdge(player, heading, face) {
+        phase = 'profile'
+        const left = heading + Math.PI / 2
+        edge = {
+            heading,
+            face,
+            attempt: 'left',
+            steps: 0,
+            origin: { x: player.x, y: player.y },
+            from: { x: player.x, y: player.y },
+            dest: stepToward(player, left, PROBE),
+            at: 0,
+        }
+        anchor = { x: player.x, y: player.y }
+        anchorAt = Date.now()
+    }
+
+    function edgeStep(player, rect, now, labelText) {
+        if (edge.at && now - edge.at < 600) {
+            noteLines(player, snapshot().entities, null)
+            publish('profiling', `Trying around the obstacle (${edge.attempt}). ${labelText}`)
             return
         }
-        const moved = Math.hypot(player.x - anchor.x, player.y - anchor.y)
-        if (profile.steps > 0) {
-            const probed = {
-                x: anchor.x + Math.cos(profile.angle) * 5,
-                y: anchor.y + Math.sin(profile.angle) * 5,
-            }
-            if (moved < STUCK_MOVE) {
-                if (terrain) terrain.mark(player.map, probed.x, probed.y, 'blocked')
-                state.motion = 'Probe did not move. Marked that cell blocked.'
-                profile.angle += Math.PI / 3
+        if (edge.at) {
+            const moved = Math.hypot(player.x - edge.from.x, player.y - edge.from.y)
+            if (moved >= PROBE_MOVE) {
+                if (terrain) terrain.markSegment(player.map, edge.from.x, edge.from.y, player.x, player.y)
+                state.motion = `Moved ${moved.toFixed(1)} m around it.`
+                if (edge.attempt === 'left') edge.heading += Math.PI / 2
+                if (edge.attempt === 'right') edge.heading -= Math.PI / 2
+                edge.attempt = 'along'
+            } else if (edge.attempt === 'left') {
+                edge.attempt = 'right'
+                state.motion = 'Left side did not move. Trying the right.'
+            } else if (edge.attempt === 'right') {
+                if (terrain) terrain.mark(player.map, edge.face.x, edge.face.y, 'blocked')
+                edge.attempt = 'along'
+                edge.heading += Math.PI / 2
+                state.motion = 'Both sides failed. Marked that 2 m cell blocked.'
             } else {
-                if (terrain) terrain.markSegment(player.map, anchor.x, anchor.y, player.x, player.y)
-                state.motion = `Probe moved ${moved.toFixed(1)} m. Edge is open there.`
+                if (terrain) terrain.mark(player.map, edge.dest.x, edge.dest.y, 'blocked')
+                edge.heading += Math.PI / 6
+                state.motion = 'Edge step did not move. Following the outline.'
             }
+            edge.steps += 1
         }
-        profile.steps += 1
-        const back = Math.hypot(player.x - profile.origin.x, player.y - profile.origin.y)
-        if (profile.steps > 16 || (profile.steps > 6 && back < 4)) {
+        const back = Math.hypot(player.x - edge.origin.x, player.y - edge.origin.y)
+        if (edge.steps > 18 || (edge.steps > 8 && back < PROBE)) {
+            edge = null
             phase = 'approach'
             anchor = { x: player.x, y: player.y }
             anchorAt = now
-            noteLines(player, snapshot().entities, node)
-            publish('walking', `Profile finished around ${label(node)}. Walking again.`)
+            noteLines(player, snapshot().entities, null)
+            publish('walking', `Finished tracing the obstacle. ${state.motion}`)
             return
         }
-        anchor = { x: player.x, y: player.y }
-        const dest = {
-            x: player.x + Math.cos(profile.angle) * 5,
-            y: player.y + Math.sin(profile.angle) * 5,
-        }
-        const point = projectPoint(player, dest, rect, settings)
+        const angle = edge.attempt === 'left'
+            ? edge.heading + Math.PI / 2
+            : edge.attempt === 'right'
+                ? edge.heading - Math.PI / 2
+                : edge.heading
+        edge.dest = stepToward(player, angle, PROBE)
+        edge.from = { x: player.x, y: player.y }
+        edge.at = now
+        const point = projectPoint(player, edge.dest, rect, settings)
         if (!clickAt(point, rect)) return
-        noteLines(player, snapshot().entities, node)
-        publish('profiling', `Profiling the obstacle, step ${profile.steps}. ${state.motion}`)
+        noteLines(player, snapshot().entities, null)
+        publish('profiling', `2 m ${edge.attempt} step along the obstacle. ${state.motion}`)
     }
 
     function surveyStep(player, rect, now) {
-        if (surveyProbe && now - surveyProbe.at < 700) {
+        if (edge) {
+            edgeStep(player, rect, now, 'Mapping.')
+            return
+        }
+        if (surveyProbe && now - surveyProbe.at < 600) {
             noteLines(player, snapshot().entities, null)
-            publish('survey', `Probing ${surveyProbe.away.toFixed(0)} m away. Waiting to see if the character moves.`)
+            publish('survey', `Checking a 2 m step. Waiting for the move packet.`)
             return
         }
         if (surveyProbe) {
             const moved = Math.hypot(player.x - surveyProbe.x, player.y - surveyProbe.y)
-            if (moved < STUCK_MOVE) {
-                terrain.mark(player.map, surveyProbe.destX, surveyProbe.destY, 'blocked')
-                state.motion = `Did not move. Blocked at ${surveyProbe.destX.toFixed(0)}, ${surveyProbe.destY.toFixed(0)}.`
-            } else {
+            if (moved >= PROBE_MOVE) {
                 terrain.markSegment(player.map, surveyProbe.x, surveyProbe.y, player.x, player.y)
-                state.motion = `Moved ${moved.toFixed(1)} m. Marked that ground open.`
+                state.motion = `Moved ${moved.toFixed(1)} m. That 2 m cell is open.`
+                surveyProbe = null
+            } else {
+                state.motion = 'Forward step did not move. Trying around it before marking anything.'
+                const face = { x: surveyProbe.destX, y: surveyProbe.destY }
+                beginEdge(player, surveyProbe.heading, face)
+                surveyProbe = null
+                noteLines(player, snapshot().entities, null)
+                publish('profiling', state.motion)
+                return
             }
-            surveyProbe = null
         }
-        const goal = terrain.nearestUnknown(player.map, player.x, player.y, 40)
-            || terrain.nearestUnknown(player.map, player.x, player.y, 75)
+        const goal = terrain.nearestUnknown(player.map, player.x, player.y, 24)
+            || terrain.nearestUnknown(player.map, player.x, player.y, 50)
         noteLines(player, snapshot().entities, null)
         if (!goal) {
             publish('survey', 'Ground around you is mapped. Walk to a new area, or stop mapping.')
             return
         }
         const away = Math.hypot(goal.x - player.x, goal.y - player.y)
-        const step = Math.min(6, away)
-        const dest = {
-            x: player.x + ((goal.x - player.x) / away) * step,
-            y: player.y + ((goal.y - player.y) / away) * step,
-        }
-        surveyProbe = { x: player.x, y: player.y, destX: goal.x, destY: goal.y, at: now, away }
+        const heading = Math.atan2(goal.y - player.y, goal.x - player.x)
+        const dest = stepToward(player, heading, Math.min(PROBE, away))
+        surveyProbe = { x: player.x, y: player.y, destX: dest.x, destY: dest.y, heading, at: now }
         const point = projectPoint(player, dest, rect, settings)
         if (!clickAt(point, rect)) return
-        publish('survey', `Mapping unknown ground ${away.toFixed(0)} m away. ${state.motion}`)
+        publish('survey', `2 m probe toward unmapped ground, ${away.toFixed(0)} m away. ${state.motion}`)
     }
 
     function skipFor(id, ms, why) {
@@ -723,8 +758,8 @@ function createGather(snapshot, emit, terrain) {
             phaseSince = now
             resetRoute()
         }
-        if (phase === 'profile') {
-            profileStep(player, node, rect, now)
+        if (phase === 'profile' && edge) {
+            edgeStep(player, rect, now, label(node))
             return
         }
         if (now - lastClick < CLICK_MS) {
@@ -734,12 +769,10 @@ function createGather(snapshot, emit, terrain) {
         }
 
         if (stuckTooLong(player, now)) {
-            const blockedX = player.x + ((node.x - player.x) / away) * 5
-            const blockedY = player.y + ((node.y - player.y) / away) * 5
-            if (terrain) terrain.mark(player.map, blockedX, blockedY, 'blocked')
-            beginProfile(player, node, now)
+            const heading = Math.atan2(node.y - player.y, node.x - player.x)
+            beginEdge(player, heading, stepToward(player, heading, PROBE))
             noteLines(player, view.entities, node)
-            publish('profiling', `Position did not change. Profiling the blocked ground in front of ${label(node)}.`)
+            publish('profiling', `Not moving forward. Checking left and right before marking ${label(node)}'s path blocked.`)
             return
         }
 
