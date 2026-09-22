@@ -116,13 +116,14 @@
       <label>Scale <input id="scale" type="number" min="4" max="80" step="0.1" value="14"></label>
       <label>Angle <input id="angle" type="number" min="-180" max="180" value="0"></label>
     </div>
-    <p>Press Capture, then move the cursor onto the highlighted node. It is read when the countdown ends.</p>
+    <p>Capture two nodes in different directions. One scale and angle cannot match the isometric camera, so the second capture fits both axes. Press Capture, then move onto the highlighted node before the countdown ends.</p>
     <div class="row">
       <button type="button" id="mark">Mark node</button>
       <button type="button" id="capture">Capture</button>
       <button type="button" id="aim">Aim</button>
     </div>
     <label><input id="automount" type="checkbox"> Mount with A after each harvest</label>
+    <label><input id="avoid-mobs" type="checkbox" checked> Avoid mobs</label>
     <div class="row">
       <button type="button" id="gather-toggle">Start gathering</button>
     </div>
@@ -354,6 +355,8 @@ function gatherBody(enabled) {
     scale: Number(document.getElementById('scale').value),
     angle: Number(document.getElementById('angle').value),
     automount: document.getElementById('automount').checked,
+    avoidMobs: document.getElementById('avoid-mobs').checked,
+    useManual,
   }
 }
 
@@ -372,11 +375,11 @@ function applyGather(data) {
   draw()
 }
 
-async function saveGather(enabled) {
+async function saveGather(enabled, useManual) {
   const res = await fetch('/api/gather', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(gatherBody(enabled)),
+    body: JSON.stringify(gatherBody(enabled, useManual)),
   })
   applyGather(await res.json())
 }
@@ -420,8 +423,11 @@ document.getElementById('aim').onclick = async () => {
   document.getElementById('gather-status').textContent = data.detail || 'Aim failed.'
   draw()
 }
-document.querySelectorAll('[data-type], #min-tier, #scale, #angle, #automount').forEach((input) => {
+document.querySelectorAll('[data-type], #min-tier, #automount, #avoid-mobs').forEach((input) => {
   input.onchange = () => { if (gathering) saveGather(true) }
+})
+document.querySelectorAll('#scale, #angle').forEach((input) => {
+  input.onchange = () => saveGather(gathering, true)
 })
 
 fetch('/api/state').then((res) => res.json()).then((data) => {
@@ -432,6 +438,7 @@ fetch('/api/state').then((res) => res.json()).then((data) => {
     document.getElementById('scale').value = data.gather.scale
     document.getElementById('angle').value = data.gather.angle
     document.getElementById('automount').checked = Boolean(data.gather.automount)
+    document.getElementById('avoid-mobs').checked = data.gather.avoidMobs !== false
     for (const [name, on] of Object.entries(data.gather.types || {})) {
       const input = document.querySelector('[data-type="' + name + '"]')
       if (input) input.checked = on

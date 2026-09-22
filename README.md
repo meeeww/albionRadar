@@ -14,7 +14,7 @@ Other players' live positions are encrypted on the wire, so they are not drawn.
 
 ### Auto gather
 
-The sidebar can walk your character to wood, rock, fiber, hide, or ore at or above a tier you choose, then click the node. It is off until you start it. Lock the camera, press Mark node, press Capture, then move the cursor onto that node before the 3 second countdown ends. Aim checks the result. Mount with A after each harvest is optional. Gathering moves the mouse inside the Albion window.
+The sidebar can walk your character to wood, rock, fiber, hide, or ore at or above a tier you choose, then click the node. It is off until you start it. Lock the camera. Mark and capture two nodes in different directions so the isometric view can be fit; a single angle is not enough. Aim checks the result. Mount with A after each harvest, and avoiding mobs, are optional. Gathering moves the mouse inside the Albion window.
 
 ### Run
 

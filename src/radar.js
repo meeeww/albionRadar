@@ -127,7 +127,12 @@ function startRadar() {
     return server
 }
 
+function observe(kind, message) {
+    gather.observe(kind, message)
+}
+
 module.exports = {
     startRadar,
     ingest: world.ingest,
+    observe,
 }
