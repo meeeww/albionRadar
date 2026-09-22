@@ -169,7 +169,7 @@ function calibrationNode(player, entities, sample) {
 }
 
 function mobOnNode(node, entities) {
-    return entities.some((entity) => entity.kind === 'mob' && distance(node, entity) < MOB_PADDING)
+    return entities.some((entity) => entity.kind === 'mob' && distance(node, entity) < 6)
 }
 
 function pickTarget(player, entities, settings, skipped, now) {
@@ -198,7 +198,7 @@ function createGather(snapshot, emit) {
         scale: 14,
         angle: 0,
         automount: false,
-        avoidMobs: false,
+        avoidMobs: true,
         view: null,
     }
     const state = {
@@ -419,7 +419,7 @@ function createGather(snapshot, emit) {
     }
 
     function harvestFinished(since) {
-        return harvestEndedAt >= since && harvestEndedAt >= harvestSeenAt && harvestSeenAt >= since
+        return harvestEndedAt >= since && (harvestSeenAt < since || harvestEndedAt >= harvestSeenAt)
     }
 
     function beginSurround(player, node, now) {

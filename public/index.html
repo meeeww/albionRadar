@@ -343,7 +343,7 @@ document.getElementById('clear').onclick = async () => {
 
 window.addEventListener('resize', resize)
 
-function gatherBody(enabled) {
+function gatherBody(enabled, useManual) {
   const types = {}
   document.querySelectorAll('[data-type]').forEach((input) => {
     types[input.dataset.type] = input.checked
