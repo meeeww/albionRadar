@@ -15,9 +15,10 @@ const STUCK_MS = 2800
 const SURROUND_RADIUS = 6
 const SURROUND_STEPS = 8
 const SURROUND_LAPS = 2
-const MOB_PADDING = 9
+const MOB_PADDING = 16
 const HARVEST_PULSE = 52
 const HARVEST_END = 53
+const CAST_HIT = 21
 const COMPASS = -Math.PI / 4
 const TUNE = [
     { scale: 1, angle: 12 },
@@ -188,7 +189,14 @@ function calibrationNode(player, entities, sample) {
 }
 
 function mobOnNode(node, entities) {
-    return entities.some((entity) => entity.kind === 'mob' && distance(node, entity) < 6)
+    return entities.some((entity) => entity.kind === 'mob' && distance(node, entity) < MOB_PADDING)
+}
+
+function stepHitsMob(player, step, entities) {
+    if (!step) return true
+    if (mobsNearPath(player.x, player.y, step.x, step.y, entities, MOB_PADDING)) return true
+    return entities.some((entity) => entity.kind === 'mob'
+        && Math.hypot(entity.x - step.x, entity.y - step.y) < MOB_PADDING)
 }
 
 function skipRow(skipped, id) {
@@ -380,6 +388,11 @@ function createGather(snapshot, emit, terrain) {
             const delta = Number(parameters[2])
             if (Number.isFinite(delta) && delta < 0) noteDamage(parameters[6])
         }
+        if (kind === 'event' && code === CAST_HIT) {
+            const caster = parameters[0] == null ? null : String(parameters[0])
+            if (playerId && caster === playerId) return
+            noteDamage(parameters[0])
+        }
     }
 
     function noteDamage(attackerId) {
@@ -387,7 +400,7 @@ function createGather(snapshot, emit, terrain) {
         threatId = attackerId == null ? null : String(attackerId)
         fleeStage = 'run'
         fleeUntil = Date.now() + 5000
-        publish('fleeing', 'Took damage. Running for 5 seconds, then remounting to drop focus.')
+        publish('fleeing', 'A mob landed a hit. Running for 5 seconds, then remounting to drop focus.')
     }
 
     function tapMount() {
@@ -697,13 +710,18 @@ function createGather(snapshot, emit, terrain) {
         const stillWanted = target && !rejection(target, view.entities, settings, skipped, now, blockedAt(player))
 
         if (!stillWanted) {
-            if (phase === 'harvest' && settings.automount) pressMount()
+            const nodeGone = phase === 'harvest'
+            if (nodeGone && settings.automount) pressMount()
             const next = pickTarget(player, view.entities, settings, skipped, now, blockedAt(player))
             state.targetId = next ? next.id : null
             phase = 'approach'
             phaseSince = now
             harvestSize = null
             resetRoute()
+            if (nodeGone) {
+                const mounted = settings.automount ? ' Mounting.' : ''
+                publish('searching', `Node is gone from the map.${mounted} Moving to the next one.`)
+            }
             if (!next) {
                 noteLines(player, view.entities, null)
                 publish('searching', 'No matching resource in range.')
@@ -736,15 +754,13 @@ function createGather(snapshot, emit, terrain) {
                 harvestSize = node.size
                 harvestClicks = 0
             }
-            const depleted = node.size != null && harvestSize != null && node.size < harvestSize
-            if (depleted || harvestFinished(phaseSince)) {
-                skipFor(node.id, 5000, 'just harvested')
-                if (settings.automount) pressMount()
-                state.targetId = null
-                phase = 'idle'
-                const mounted = settings.automount ? ' Mounting.' : ''
-                publish('searching', `Finished ${label(node)}.${mounted}`)
-                return
+            const chargeTaken = (node.size != null && harvestSize != null && node.size < harvestSize)
+                || (harvestClicks > 0 && harvestFinished(phaseSince))
+            if (chargeTaken) {
+                harvestSize = node.size
+                phaseSince = now + 1
+                harvestClicks = 0
+                publish('harvesting', `Charge taken from ${label(node)}. The node is still here, harvesting again.`)
             }
             const started = harvestStarted(phaseSince)
             if (started && tuneIndex > 0) {
@@ -808,9 +824,11 @@ function createGather(snapshot, emit, terrain) {
                 return
             }
             step = terrain.pointAlong(routed, Math.min(away, away <= 8 ? away : 6))
+            if (settings.avoidMobs && stepHitsMob(player, step, view.entities)) step = null
         }
         if (!step) step = steerPoint(player, node, view.entities, away <= 8 ? away : 6, settings.avoidMobs)
-        if (!step && away <= 8) step = { x: node.x, y: node.y }
+        if (settings.avoidMobs && stepHitsMob(player, step, view.entities)) step = null
+        if (!step && away <= 8 && !settings.avoidMobs) step = { x: node.x, y: node.y }
         if (!step) {
             skipFor(node.id, 8000, 'mob blocking the path')
             state.targetId = null
