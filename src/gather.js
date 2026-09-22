@@ -50,6 +50,41 @@ function surroundPoint(player, node, step, radius) {
     }
 }
 
+function solveView(player, node, cursor, rect) {
+    const dx = node.x - player.x
+    const dy = node.y - player.y
+    const world = Math.hypot(dx, dy)
+    if (world < 6) return null
+    const cx = (rect.left + rect.right) / 2
+    const cy = (rect.top + rect.bottom) / 2
+    const sx = cursor.x - cx
+    const sy = cy - cursor.y
+    const screen = Math.hypot(sx, sy)
+    if (screen < 12) return null
+    let angle = (Math.atan2(sy, sx) - Math.atan2(dy, dx)) * 180 / Math.PI
+    while (angle > 180) angle -= 360
+    while (angle < -180) angle += 360
+    return {
+        scale: Math.round((screen / world) * 10) / 10,
+        angle: Math.round(angle),
+    }
+}
+
+function calibrationNode(player, entities) {
+    let best = null
+    let bestDistance = Infinity
+    for (const entity of entities) {
+        if (entity.kind !== 'resource') continue
+        const away = distance(player, entity)
+        if (away < 8 || away > 40) continue
+        if (away < bestDistance) {
+            best = entity
+            bestDistance = away
+        }
+    }
+    return best
+}
+
 function pickTarget(player, entities, settings, skipped, now) {
     let best = null
     let bestDistance = Infinity
@@ -74,6 +109,7 @@ function createGather(snapshot, emit) {
         minTier: 1,
         scale: 14,
         angle: 0,
+        automount: false,
     }
     const state = {
         status: 'off',
@@ -106,6 +142,7 @@ function createGather(snapshot, emit) {
             minTier: settings.minTier,
             scale: settings.scale,
             angle: settings.angle,
+            automount: settings.automount,
             status: state.status,
             targetId: state.targetId,
             detail: state.detail,
@@ -123,12 +160,12 @@ function createGather(snapshot, emit) {
         const tier = Number(next.minTier)
         if (Number.isFinite(tier)) settings.minTier = Math.max(1, Math.min(8, Math.round(tier)))
         const scale = Number(next.scale)
-        if (Number.isFinite(scale)) settings.scale = Math.max(4, Math.min(40, scale))
+        if (Number.isFinite(scale)) settings.scale = Math.max(4, Math.min(80, scale))
         const angle = Number(next.angle)
         if (Number.isFinite(angle)) settings.angle = Math.max(-180, Math.min(180, angle))
+        if (typeof next.automount === 'boolean') settings.automount = next.automount
         if (!settings.enabled) {
             phase = 'idle'
-            state.targetId = null
             resetRoute()
             publish('off', '')
         }
@@ -173,6 +210,50 @@ function createGather(snapshot, emit) {
         state.targetId = target.id
         publish('aiming', `Cursor on ${label(target)}. Adjust scale and angle until it sits on the node.`)
         return { ok: true, detail: state.detail }
+    }
+
+    function markNode() {
+        settings.enabled = false
+        phase = 'idle'
+        const view = snapshot()
+        const player = view.player
+        if (!Number.isFinite(player.x)) return { ok: false, detail: 'Move once so the radar has your position.' }
+        const node = calibrationNode(player, view.entities)
+        if (!node) return { ok: false, detail: 'Need a resource about 8 to 40 m away. Walk until one is on the radar.' }
+        state.targetId = node.id
+        const away = distance(player, node)
+        publish('marking', `Hover ${label(node)} in the game (${away.toFixed(0)} m, highlighted). Then press Capture.`)
+        return { ok: true, detail: state.detail }
+    }
+
+    function calibrate() {
+        settings.enabled = false
+        phase = 'idle'
+        const view = snapshot()
+        const player = view.player
+        if (!Number.isFinite(player.x)) return { ok: false, detail: 'Move once so the radar has your position.' }
+        const node = view.entities.find((entity) => entity.id === state.targetId && entity.kind === 'resource')
+        if (!node) return { ok: false, detail: 'Press Mark node first, then hover that node.' }
+        const win = Window.getByTitle('Albion Online Client')
+        const rect = win && win.getDimensions()
+        if (!rect) return { ok: false, detail: 'Albion window not found.' }
+        const cursor = mouse()
+        if (!cursor) return { ok: false, detail: 'Mouse control is not installed.' }
+        const solved = solveView(player, node, cursor.getMousePos(), rect)
+        if (!solved) return { ok: false, detail: 'Put the cursor on the highlighted node, not on your character, then capture again.' }
+        settings.scale = Math.max(4, Math.min(80, solved.scale))
+        settings.angle = solved.angle
+        publish('calibrated', `Scale ${settings.scale}, angle ${settings.angle}. Press Aim to check the cursor lands on the node.`)
+        return { ok: true, detail: state.detail, scale: settings.scale, angle: settings.angle }
+    }
+
+    function pressMount() {
+        const cursor = mouse()
+        if (!cursor) return
+        const win = Window.getByTitle('Albion Online Client')
+        if (win) win.focus()
+        cursor.keyTap('a')
+        lastClick = Date.now() + 700
     }
 
     function label(entity) {
@@ -239,6 +320,7 @@ function createGather(snapshot, emit) {
             && (skipped.get(target.id) || 0) <= now
 
         if (!stillWanted) {
+            if (phase === 'harvest' && settings.automount) pressMount()
             const next = pickTarget(player, view.entities, settings, skipped, now)
             state.targetId = next ? next.id : null
             phase = 'approach'
@@ -283,9 +365,11 @@ function createGather(snapshot, emit) {
             const depleted = node.size != null && harvestSize != null && node.size < harvestSize
             if (depleted) {
                 skipped.set(node.id, now + 5000)
+                if (settings.automount) pressMount()
                 state.targetId = null
                 phase = 'idle'
-                publish('searching', `Finished ${label(node)}.`)
+                const mounted = settings.automount ? ' Mounting.' : ''
+                publish('searching', `Finished ${label(node)}.${mounted}`)
                 return
             }
             if (now - phaseSince > HARVEST_GIVE_UP_MS) {
@@ -366,7 +450,7 @@ function createGather(snapshot, emit) {
     const timer = setInterval(tick, 200)
     if (typeof timer.unref === 'function') timer.unref()
 
-    return { configure, aim, publicState }
+    return { configure, aim, markNode, calibrate, publicState }
 }
 
 module.exports = {
@@ -374,4 +458,5 @@ module.exports = {
     projectPoint,
     pickTarget,
     surroundPoint,
+    solveView,
 }

@@ -113,11 +113,17 @@
     </div>
     <div class="row">
       <label>Tier <input id="min-tier" type="number" min="1" max="8" value="1"></label>
-      <label>Scale <input id="scale" type="number" min="4" max="40" value="14"></label>
+      <label>Scale <input id="scale" type="number" min="4" max="80" step="0.1" value="14"></label>
       <label>Angle <input id="angle" type="number" min="-180" max="180" value="0"></label>
     </div>
+    <p>Mark a node, hover it in the game, then capture. That fills scale and angle.</p>
     <div class="row">
+      <button type="button" id="mark">Mark node</button>
+      <button type="button" id="capture">Capture</button>
       <button type="button" id="aim">Aim</button>
+    </div>
+    <label><input id="automount" type="checkbox"> Mount with A after each harvest</label>
+    <div class="row">
       <button type="button" id="gather-toggle">Start gathering</button>
     </div>
   </div>
@@ -346,6 +352,7 @@ function gatherBody(enabled) {
     minTier: Number(document.getElementById('min-tier').value),
     scale: Number(document.getElementById('scale').value),
     angle: Number(document.getElementById('angle').value),
+    automount: document.getElementById('automount').checked,
   }
 }
 
@@ -355,6 +362,10 @@ function applyGather(data) {
   gatherTarget = data.targetId || null
   document.getElementById('gather-toggle').textContent = gathering ? 'Stop gathering' : 'Start gathering'
   document.getElementById('gather-status').textContent = data.detail || (gathering ? 'Looking for a node.' : 'Off. Choose what to pick up, aim the cursor, then start.')
+  if (data.status === 'calibrated') {
+    document.getElementById('scale').value = data.scale
+    document.getElementById('angle').value = data.angle
+  }
   draw()
 }
 
@@ -368,6 +379,22 @@ async function saveGather(enabled) {
 }
 
 document.getElementById('gather-toggle').onclick = () => saveGather(!gathering)
+document.getElementById('mark').onclick = async () => {
+  const res = await fetch('/api/gather/mark', { method: 'POST' })
+  const data = await res.json()
+  document.getElementById('gather-status').textContent = data.detail || 'Could not mark a node.'
+  draw()
+}
+document.getElementById('capture').onclick = async () => {
+  const res = await fetch('/api/gather/calibrate', { method: 'POST' })
+  const data = await res.json()
+  if (data.scale != null) {
+    document.getElementById('scale').value = data.scale
+    document.getElementById('angle').value = data.angle
+  }
+  document.getElementById('gather-status').textContent = data.detail || 'Capture failed.'
+  draw()
+}
 document.getElementById('aim').onclick = async () => {
   await saveGather(false)
   const res = await fetch('/api/gather/aim', { method: 'POST' })
@@ -375,7 +402,7 @@ document.getElementById('aim').onclick = async () => {
   document.getElementById('gather-status').textContent = data.detail || 'Aim failed.'
   draw()
 }
-document.querySelectorAll('[data-type], #min-tier, #scale, #angle').forEach((input) => {
+document.querySelectorAll('[data-type], #min-tier, #scale, #angle, #automount').forEach((input) => {
   input.onchange = () => { if (gathering) saveGather(true) }
 })
 
@@ -386,6 +413,7 @@ fetch('/api/state').then((res) => res.json()).then((data) => {
     document.getElementById('min-tier').value = data.gather.minTier
     document.getElementById('scale').value = data.gather.scale
     document.getElementById('angle').value = data.gather.angle
+    document.getElementById('automount').checked = Boolean(data.gather.automount)
     for (const [name, on] of Object.entries(data.gather.types || {})) {
       const input = document.querySelector('[data-type="' + name + '"]')
       if (input) input.checked = on

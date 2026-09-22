@@ -93,6 +93,20 @@ function startRadar() {
             return
         }
 
+        if (req.method === 'POST' && url.pathname === '/api/gather/mark') {
+            const result = gather.markNode()
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(result))
+            return
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/gather/calibrate') {
+            const result = gather.calibrate()
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(result))
+            return
+        }
+
         res.writeHead(404)
         res.end()
     })
