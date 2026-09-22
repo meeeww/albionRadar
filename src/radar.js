@@ -57,7 +57,7 @@ function startRadar() {
             res.end(JSON.stringify({
                 ...snap,
                 gather: gather.publicState(),
-                terrain: terrain.around(snap.player.map, snap.player, 90),
+                terrain: terrain.view(snap.player.map),
             }))
             return
         }
@@ -114,11 +114,22 @@ function startRadar() {
             return
         }
 
-        if (req.method === 'POST' && (url.pathname === '/api/terrain/reprofile' || url.pathname === '/api/terrain/open')) {
+        if (req.method === 'POST' && url.pathname.startsWith('/api/terrain/')) {
             readJson(req).then((body) => {
-                const result = url.pathname.endsWith('/open')
-                    ? gather.allowGround(body.x, body.y)
-                    : gather.reprofile(body.x, body.y)
+                const action = url.pathname.slice('/api/terrain/'.length)
+                let result = gather.zonesView()
+                if (action === 'begin') result = gather.draftBegin()
+                else if (action === 'point') result = gather.draftPoint(body.x, body.y)
+                else if (action === 'undo') result = gather.draftUndo()
+                else if (action === 'cancel') result = gather.draftCancel()
+                else if (action === 'ramp') result = gather.markRamp(body.id, body.x, body.y)
+                else if (action === 'solid') result = gather.markSolid(body.id)
+                else if (action === 'remove') result = gather.removeZone(body.id)
+                else {
+                    res.writeHead(404)
+                    res.end()
+                    return
+                }
                 res.writeHead(200, { 'Content-Type': 'application/json' })
                 res.end(JSON.stringify(result))
             }).catch(() => {

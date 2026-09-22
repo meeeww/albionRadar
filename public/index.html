@@ -103,8 +103,8 @@
     <li><span class="swatch" style="background:#e2c56a"></span>Chest</li>
     <li><span class="swatch" style="background:#e39b54"></span>Dungeon</li>
     <li><span class="swatch" style="background:#b388ff;border-radius:50%"></span>Mist</li>
-    <li><span class="swatch" style="background:#d68c28"></span>Not profiled</li>
-    <li><span class="swatch" style="background:#c4463c"></span>Blocked ground</li>
+    <li><span class="swatch" style="background:#c4463c"></span>Dead zone</li>
+    <li><span class="swatch" style="background:#7dcea0"></span>Way up</li>
   </ul>
   <h2>Auto gather</h2>
   <div class="gather">
@@ -129,12 +129,14 @@
     </div>
     <label><input id="automount" type="checkbox"> Mount with A after each harvest</label>
     <label><input id="avoid-mobs" type="checkbox" checked> Avoid mobs</label>
-    <label><input id="survey" type="checkbox"> Map the ground</label>
-    <pre id="report"></pre>
-    <div id="cell-actions" hidden>
-      <button type="button" id="reprofile">Re-profile this spot</button>
-      <button type="button" id="clear-block">Good to go</button>
+    <div class="row">
+      <button type="button" id="capture-zone">Capture dead zone</button>
+      <button type="button" id="undo-point">Undo point</button>
+      <button type="button" id="zone-solid" hidden>Solid wall</button>
+      <button type="button" id="remove-zone">Remove last zone</button>
     </div>
+    <p id="zone-help">Click Capture dead zone, then click around a cliff or rock on the radar. When you click near the first point, the outline closes and that inside becomes a no-go. Then click the one edge that is the way up, or press Solid wall.</p>
+    <pre id="report"></pre>
     <div class="row">
       <button type="button" id="gather-toggle">Start gathering</button>
     </div>
@@ -150,8 +152,8 @@ let radius = Number(localStorage.getItem('radar-radius')) || 50
 let gatherTarget = null
 let gathering = false
 let captureWait = false
-let ground = { cell: 2, blocked: [], open: [] }
-let selectedCell = null
+let ground = { zones: [], draft: [], waitingRamp: null }
+let capturingZone = false
 const canvas = document.getElementById('map')
 const ctx = canvas.getContext('2d')
 const list = document.getElementById('list')
@@ -261,26 +263,47 @@ function draw() {
     }
   }
 
+  function worldToScreen(x, y) {
+    return {
+      x: cx + (x - player.x) * scale,
+      y: cy - (y - player.y) * scale,
+    }
+  }
+  function traceZone(points, close) {
+    if (!points || points.length < 2 || !hasPlayer()) return
+    ctx.beginPath()
+    points.forEach((point, index) => {
+      const spot = worldToScreen(point.x, point.y)
+      if (index === 0) ctx.moveTo(spot.x, spot.y)
+      else ctx.lineTo(spot.x, spot.y)
+    })
+    if (close) ctx.closePath()
+  }
   if (hasPlayer()) {
-    const step = ground.cell || 5
-    const gx0 = Math.round((player.x - radius) / step)
-    const gx1 = Math.round((player.x + radius) / step)
-    const gy0 = Math.round((player.y - radius) / step)
-    const gy1 = Math.round((player.y + radius) / step)
-    const openKeys = new Set(ground.open.map((cell) => Math.round(cell.x / step) + ',' + Math.round(cell.y / step)))
-    const blockedKeys = new Set(ground.blocked.map((cell) => Math.round(cell.x / step) + ',' + Math.round(cell.y / step)))
-    for (let gx = gx0; gx <= gx1; gx++) {
-      for (let gy = gy0; gy <= gy1; gy++) {
-        const key = gx + ',' + gy
-        if (openKeys.has(key)) continue
-        const blocked = blockedKeys.has(key)
-        const px = cx + (gx * step - player.x) * scale
-        const py = cy - (gy * step - player.y) * scale
-        const size = step * scale
-        ctx.fillStyle = blocked ? 'rgba(196, 70, 60, 0.58)' : 'rgba(214, 140, 40, 0.28)'
-        ctx.fillRect(px - size / 2, py - size / 2, size, size)
+    for (const zone of ground.zones || []) {
+      traceZone(zone.points, true)
+      ctx.fillStyle = 'rgba(196, 70, 60, 0.38)'
+      ctx.fill()
+      ctx.strokeStyle = '#e7e1d1'
+      ctx.lineWidth = 2
+      ctx.stroke()
+      if (zone.ramp != null && zone.points[zone.ramp]) {
+        const a = zone.points[zone.ramp]
+        const b = zone.points[(zone.ramp + 1) % zone.points.length]
+        const sa = worldToScreen(a.x, a.y)
+        const sb = worldToScreen(b.x, b.y)
+        ctx.strokeStyle = '#7dcea0'
+        ctx.lineWidth = 4
+        ctx.beginPath()
+        ctx.moveTo(sa.x, sa.y)
+        ctx.lineTo(sb.x, sb.y)
+        ctx.stroke()
       }
     }
+    traceZone(ground.draft, false)
+    ctx.strokeStyle = '#e2c56a'
+    ctx.lineWidth = 2
+    ctx.stroke()
   }
 
   const visible = shown().filter((entity) => distance(entity) <= radius * 1.02)
@@ -391,7 +414,6 @@ function gatherBody(enabled, useManual) {
     angle: Number(document.getElementById('angle').value),
     automount: document.getElementById('automount').checked,
     avoidMobs: document.getElementById('avoid-mobs').checked,
-    survey: document.getElementById('survey').checked,
     useManual,
   }
 }
@@ -463,7 +485,6 @@ document.getElementById('aim').onclick = async () => {
 document.querySelectorAll('[data-type], #min-tier, #automount, #avoid-mobs').forEach((input) => {
   input.onchange = () => { if (gathering) saveGather(true) }
 })
-document.getElementById('survey').onchange = () => saveGather(gathering)
 document.querySelectorAll('#scale, #angle').forEach((input) => {
   input.onchange = () => saveGather(gathering, true)
 })
@@ -471,14 +492,13 @@ document.querySelectorAll('#scale, #angle').forEach((input) => {
 fetch('/api/state').then((res) => res.json()).then((data) => {
   player = data.player
   for (const entity of data.entities) entities.set(String(entity.id), entity)
-  if (data.terrain) ground = data.terrain
+  if (data.terrain) showZones(data.terrain)
   if (data.gather) {
     document.getElementById('min-tier').value = data.gather.minTier
     document.getElementById('scale').value = data.gather.scale
     document.getElementById('angle').value = data.gather.angle
     document.getElementById('automount').checked = Boolean(data.gather.automount)
     document.getElementById('avoid-mobs').checked = data.gather.avoidMobs !== false
-    document.getElementById('survey').checked = Boolean(data.gather.survey)
     for (const [name, on] of Object.entries(data.gather.types || {})) {
       const input = document.querySelector('[data-type="' + name + '"]')
       if (input) input.checked = on
@@ -502,43 +522,88 @@ source.addEventListener('reset', (event) => {
   draw()
 })
 source.addEventListener('gather', (event) => applyGather(JSON.parse(event.data)))
-source.addEventListener('terrain', (event) => {
-  ground = JSON.parse(event.data)
+function showZones(data) {
+  if (!data) return
+  ground = {
+    zones: data.zones || [],
+    draft: data.draft || [],
+    waitingRamp: data.waitingRamp || null,
+  }
+  document.getElementById('zone-solid').hidden = !ground.waitingRamp
+  if (data.closed) document.getElementById('gather-status').textContent = 'Outline closed. Click the edge that is the way up, or press Solid wall.'
   draw()
-})
+}
 
-canvas.onclick = (event) => {
-  if (!hasPlayer()) return
+source.addEventListener('terrain', (event) => showZones(JSON.parse(event.data)))
+
+function screenToWorld(event) {
   const box = canvas.getBoundingClientRect()
   const size = canvas.clientWidth
   const localX = (event.clientX - box.left) * size / box.width
   const localY = (event.clientY - box.top) * size / box.height
-  const ring = size / 2 - 28
-  const scale = ring / radius
-  const worldX = player.x + (localX - size / 2) / scale
-  const worldY = player.y - (localY - size / 2) / scale
-  const step = ground.cell || 5
-  const gx = Math.round(worldX / step) * step
-  const gy = Math.round(worldY / step) * step
-  const blocked = ground.blocked.some((cell) => Math.round(cell.x / step) === Math.round(gx / step) && Math.round(cell.y / step) === Math.round(gy / step))
-  selectedCell = { x: gx, y: gy }
-  const actions = document.getElementById('cell-actions')
-  actions.hidden = !blocked
-  if (!blocked) document.getElementById('gather-status').textContent = 'That spot is not marked blocked. Orange ground has not been profiled yet.'
+  const scale = (size / 2 - 28) / radius
+  return {
+    x: player.x + (localX - size / 2) / scale,
+    y: player.y - (localY - size / 2) / scale,
+  }
 }
 
-async function postCell(path) {
-  if (!selectedCell) return
-  const res = await fetch(path, {
+canvas.onclick = async (event) => {
+  if (!hasPlayer()) return
+  const world = screenToWorld(event)
+  if (ground.waitingRamp) {
+    const res = await fetch('/api/terrain/ramp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: ground.waitingRamp, x: world.x, y: world.y }),
+    })
+    const data = await res.json()
+    showZones(data)
+    document.getElementById('gather-status').textContent = 'That edge is the way up. Harvest paths can cross only there.'
+    return
+  }
+  if (!capturingZone) return
+  const res = await fetch('/api/terrain/point', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(selectedCell),
+    body: JSON.stringify(world),
   })
-  applyGather(await res.json())
-  document.getElementById('cell-actions').hidden = true
+  showZones(await res.json())
 }
-document.getElementById('reprofile').onclick = () => postCell('/api/terrain/reprofile')
-document.getElementById('clear-block').onclick = () => postCell('/api/terrain/open')
+
+document.getElementById('capture-zone').onclick = async () => {
+  capturingZone = !capturingZone
+  document.getElementById('capture-zone').textContent = capturingZone ? 'Stop capturing' : 'Capture dead zone'
+  if (capturingZone) {
+    const res = await fetch('/api/terrain/begin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    showZones(await res.json())
+    document.getElementById('gather-status').textContent = 'Click around the cliff or rock. Click near the first point to close it.'
+  }
+}
+document.getElementById('undo-point').onclick = async () => {
+  const res = await fetch('/api/terrain/undo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+  showZones(await res.json())
+}
+document.getElementById('zone-solid').onclick = async () => {
+  if (!ground.waitingRamp) return
+  const res = await fetch('/api/terrain/solid', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: ground.waitingRamp }),
+  })
+  showZones(await res.json())
+  document.getElementById('gather-status').textContent = 'The whole outline is a wall. Paths go around it.'
+}
+document.getElementById('remove-zone').onclick = async () => {
+  const last = (ground.zones || []).at(-1)
+  if (!last) return
+  const res = await fetch('/api/terrain/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: last.id }),
+  })
+  showZones(await res.json())
+}
 </script>
 </body>
 </html>
