@@ -147,6 +147,7 @@
     <pre id="report"></pre>
     <div class="row">
       <button type="button" id="gather-toggle">Start gathering</button>
+      <button type="button" id="measure-toggle">Measure only</button>
     </div>
   </div>
   <h2>Nearest</h2>
@@ -159,6 +160,7 @@ let filter = 'all'
 let radius = Number(localStorage.getItem('radar-radius')) || 50
 let gatherTarget = null
 let gathering = false
+let measuring = false
 let captureWait = false
 let ground = { zones: [], draft: [], waitingRamp: null }
 let capturingZone = false
@@ -422,7 +424,7 @@ document.getElementById('clear').onclick = async () => {
 
 window.addEventListener('resize', resize)
 
-function gatherBody(enabled, useManual) {
+function gatherBody(enabled, useManual, survey) {
   const types = {}
   document.querySelectorAll('[data-type]').forEach((input) => {
     types[input.dataset.type] = input.checked
@@ -437,6 +439,7 @@ function gatherBody(enabled, useManual) {
     automount: document.getElementById('automount').checked,
     avoidMobs: document.getElementById('avoid-mobs').checked,
     preferTier: document.getElementById('prefer-tier').checked,
+    survey: survey === undefined ? measuring : survey,
     useManual,
   }
 }
@@ -444,8 +447,10 @@ function gatherBody(enabled, useManual) {
 function applyGather(data) {
   if (!data) return
   gathering = Boolean(data.enabled)
+  measuring = Boolean(data.survey)
   gatherTarget = data.targetId || null
   document.getElementById('gather-toggle').textContent = gathering ? 'Stop gathering' : 'Start gathering'
+  document.getElementById('measure-toggle').textContent = measuring ? 'Stop measuring' : 'Measure only'
   if (!captureWait) {
     document.getElementById('gather-status').textContent = data.detail || (gathering ? 'Looking for a node.' : 'Off. Choose what to pick up, aim the cursor, then start.')
   }
@@ -467,6 +472,7 @@ async function saveGather(enabled, useManual) {
 }
 
 document.getElementById('gather-toggle').onclick = () => saveGather(!gathering)
+document.getElementById('measure-toggle').onclick = () => saveGather(false, false, !measuring)
 document.getElementById('mark').onclick = async () => {
   const res = await fetch('/api/gather/mark', { method: 'POST' })
   const data = await res.json()

@@ -36,10 +36,9 @@ const SKIP_MS = 45000
 const HARVEST_PULSE = 52
 const HARVEST_END = 53
 const CAST_HIT = 21
-const HUNT_MS = 400
+const HUNT_MS = 250
 const HUNT = [
-    [0, -24], [0, -42], [16, -32], [-16, -32],
-    [0, -58], [18, -50], [-18, -50], [0, -12],
+    [0, -12], [0, -28], [14, -18], [-14, -18],
 ]
 
 function createGather(snapshot, emit, terrain, harvests) {
@@ -74,6 +73,9 @@ function createGather(snapshot, emit, terrain, harvests) {
     let liftIndex = 0
     let huntAt = 0
     let walkedOff = false
+    let stoodPos = null
+    let stoodAt = 0
+    let swingNoted = 0
     let lastAim = null
     const hunted = new Set()
     let noted = false
@@ -122,7 +124,10 @@ function createGather(snapshot, emit, terrain, harvests) {
 
     function configure(next) {
         if (!next || typeof next !== 'object') return publicState()
-        if (typeof next.enabled === 'boolean') settings.enabled = next.enabled
+        if (typeof next.enabled === 'boolean') {
+            settings.enabled = next.enabled
+            if (next.enabled) settings.survey = false
+        }
         if (next.types && typeof next.types === 'object') {
             for (const name of RESOURCE_TYPES) {
                 if (typeof next.types[name] === 'boolean') settings.types[name] = next.types[name]
@@ -139,9 +144,16 @@ function createGather(snapshot, emit, terrain, harvests) {
         if (typeof next.automount === 'boolean') settings.automount = next.automount
         if (typeof next.avoidMobs === 'boolean') settings.avoidMobs = next.avoidMobs
         if (typeof next.preferTier === 'boolean') settings.preferTier = next.preferTier
-        if (typeof next.survey === 'boolean') settings.survey = next.survey
+        if (typeof next.survey === 'boolean') {
+            settings.survey = next.survey
+            if (next.survey) {
+                settings.enabled = false
+                phase = 'idle'
+                state.targetId = null
+            } else survey = null
+        }
         if (next.useManual) settings.view = null
-        if (!settings.enabled) {
+        if (!settings.enabled && !settings.survey) {
             phase = 'idle'
             harvestClicks = 0
             publish('off', '')
@@ -265,7 +277,7 @@ function createGather(snapshot, emit, terrain, harvests) {
     }
 
     function noteMove(src, dest) {
-        if (phase === 'harvest' && distance(src, dest) > 2.5 && !(harvestSeenAt >= phaseSince)) walkedOff = true
+        if (phase === 'harvest' && !activeHarvestId && distance(src, dest) > 1.2 && !(harvestSeenAt >= phaseSince)) walkedOff = true
         if (!survey || !survey.waiting || !survey.order || !survey.from) return
         survey.pos = src
         const moved = distance(survey.from, src)
@@ -541,7 +553,16 @@ function createGather(snapshot, emit, terrain, harvests) {
         return null
     }
 
+    function hostileNear(player, range) {
+        return snapshot().entities.some((entity) => entity.kind === 'mob' && !entity.passive && distance(player, entity) < range)
+    }
+
     function surveyStep(player, rect, now) {
+        if (hostileNear(player, 16)) {
+            survey = null
+            publish('walking', 'A mob is here. Staying out of it instead of measuring a dead zone.')
+            return
+        }
         if (survey.waiting) {
             const aged = now - survey.sent >= 1400
             if (!survey.ready && !aged) {
@@ -594,6 +615,10 @@ function createGather(snapshot, emit, terrain, harvests) {
     let sweep = 0
 
     function beginSweep(player) {
+        if (fleeStage || hostileNear(player, 20)) {
+            publish('searching', 'A mob is nearby. Waiting instead of measuring a dead zone.')
+            return
+        }
         const toward = sweep * (Math.PI / 3)
         sweep += 1
         survey = {
@@ -621,7 +646,7 @@ function createGather(snapshot, emit, terrain, harvests) {
     }
 
     function tick() {
-        if (busy || !settings.enabled) return
+        if (busy || (!settings.enabled && !settings.survey)) return
         busy = true
         try {
             step()
@@ -650,12 +675,22 @@ function createGather(snapshot, emit, terrain, harvests) {
             surveyStep(player, place.rect, now)
             return
         }
+        if (settings.survey && !settings.enabled) {
+            const place = game()
+            if (!place.rect || !place.cursor) {
+                publish('waiting', place.rect ? 'Mouse control is not installed. Run npm install in albionRadar.' : 'Albion window not found.')
+                return
+            }
+            if (fleeStep(player, view.entities, place.rect, now)) return
+            beginSweep(player)
+            return
+        }
 
         const nearest = choose(player, view.entities, now)
         if (!survey && phase !== 'harvest' && nearest && nearest.id !== state.targetId) {
             const current = view.entities.find((entity) => entity.id === state.targetId)
             const currentAway = current ? distance(player, current) : Infinity
-            if (!(current && currentAway <= 8) && (!current || distance(player, nearest) < currentAway)) {
+            if (!(current && currentAway <= 8) && (!current || distance(player, nearest) + 4 < currentAway)) {
                 state.targetId = nearest.id
                 sidestepped = false
                 sidestepFrom = null
@@ -723,7 +758,7 @@ function createGather(snapshot, emit, terrain, harvests) {
                     return
                 }
                 phase = 'harvest'
-                phaseSince = now
+                phaseSince = channel ? harvestSeenAt : now
                 harvestSize = node.size
                 harvestClicks = 0
                 noted = false
@@ -736,13 +771,23 @@ function createGather(snapshot, emit, terrain, harvests) {
                     usingSaved = true
                 } else usingSaved = false
             }
-            const chargeTaken = (node.size != null && harvestSize != null && node.size < harvestSize)
-                || (harvestClicks > 0 && harvestFinished(phaseSince))
-            if (chargeTaken) {
+            const shrunk = node.size != null && harvestSize != null && node.size < harvestSize
+            const swingEnded = harvestClicks > 0 && harvestEndedAt > swingNoted && harvestFinished(phaseSince)
+            if (shrunk || swingEnded) {
                 harvestSize = node.size
-                phaseSince = now + 1
-                harvestClicks = huntAt
-                publish('harvesting', `Charge taken from ${label(node)}. The node is still here, harvesting again.`)
+                swingNoted = Math.max(harvestEndedAt, now)
+                const again = lastAim || liftAim(projectPoint(player, node, rect, settings), harvestLift(settings, liftIndex))
+                if (now - lastClick >= 400) {
+                    lastAim = again
+                    if (!clickAt(again, rect)) return
+                    rememberClick(node, rect)
+                }
+                publish('harvesting', `Charge taken from ${label(node)}. Staying until the node is gone.`)
+                return
+            }
+            if (channel) {
+                publish('harvesting', `Harvesting ${label(node)}.`)
+                return
             }
             const started = harvestStarted(phaseSince)
             if (started && !noted && harvestSeenAt >= lastClick && harvestSeenAt - lastClick < 3000) {
@@ -793,13 +838,50 @@ function createGather(snapshot, emit, terrain, harvests) {
             stuck.reset(player, now)
         }
         stuck.update(player, now)
-        if (stuck.isStuck(now) && !channel && (away <= REACH || (lastOrder && distance(lastOrder, node) < 3) || (harvestSeenAt && now - harvestSeenAt < 8000))) {
+        if (!channel && away > 8) {
+            if (!stoodPos || distance(player, stoodPos) >= 1.5) {
+                stoodPos = { x: player.x, y: player.y }
+                stoodAt = now
+            } else if (now - stoodAt > 1500) {
+                stoodPos = null
+                stuck.reset(player, now)
+                const toward = Math.atan2(node.y - player.y, node.x - player.x)
+                survey = {
+                    nodeId: node.id,
+                    origin: { x: player.x, y: player.y },
+                    orders: PROBE.map((offset) => ({
+                        x: player.x + Math.cos(toward + offset) * 8,
+                        y: player.y + Math.sin(toward + offset) * 8,
+                    })),
+                    index: 0,
+                    blocked: [],
+                    waiting: false,
+                }
+                publish('walking', 'Not moving. Measuring the dead zone instead of switching nodes.')
+                return
+            }
+        } else if (!(lastOrder && distance(lastOrder, node) < 3)) stoodPos = null
+        if (!channel && lastOrder && distance(lastOrder, node) < 3) {
+            if (!stoodPos || distance(player, stoodPos) >= 1.5) {
+                stoodPos = { x: player.x, y: player.y }
+                stoodAt = now
+            } else if (now - stoodAt > 1200) {
+                stoodPos = null
+                leaveNode(node.id, 8000, 'not moving', `Stopped short of ${label(node)}. Going to the next one.`)
+                return
+            }
+        } else stoodPos = null
+        if (stuck.isStuck(now) && !channel && away <= 8) {
             stuck.reset(player, now)
             leaveNode(node.id, 8000, 'not moving', `Standing on ${label(node)}. Going to the next one.`)
             return
         }
         if (stuck.isStuck(now) && !channel) {
             stuck.reset(player, now)
+            if (hostileNear(player, 18)) {
+                leaveNode(node.id, 12000, 'mob in the way', `Mob blocking the way to ${label(node)}. Staying out of it.`)
+                return
+            }
             const toward = Math.atan2(node.y - player.y, node.x - player.x)
             survey = {
                 nodeId: node.id,
@@ -847,7 +929,11 @@ function createGather(snapshot, emit, terrain, harvests) {
             }
             const routed = navigator.findPath(player.map, player, node, circles)
             if (!routed) {
-                leaveNode(node.id, 15000, 'no path around the dead zone', `No path around the dead zone to ${label(node)}. The way up has to be the ramp edge.`)
+                if (circles.length) {
+                    leaveNode(node.id, 12000, 'mob in the way', `Mob blocking the way to ${label(node)}. Staying out of it.`)
+                } else {
+                    leaveNode(node.id, 15000, 'no path around the dead zone', `No path around the dead zone to ${label(node)}. The way up has to be the ramp edge.`)
+                }
                 return
             }
             step = navigator.nextWaypoint(player, Math.min(away, close ? away : WALK_STEP))
