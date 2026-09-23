@@ -96,6 +96,7 @@ function createGather(snapshot, emit, terrain, harvests) {
     let sidestepFrom = null
     let survey = null
     let clickFrom = null
+    let extent = null
 
     function publish(status, detail) {
         if (state.status === status && state.detail === detail) return
@@ -304,6 +305,20 @@ function createGather(snapshot, emit, terrain, harvests) {
 
     function noteMove(src, dest) {
         if (phase === 'harvest' && !activeHarvestId && distance(src, dest) > 3 && !(harvestSeenAt >= phaseSince)) walkedOff = true
+        if (survey && survey.trace) {
+            survey.samples = survey.samples || []
+            survey.samples.push({ x: src.x, y: src.y })
+            survey.pos = src
+            const from = survey.from
+            const order = survey.order
+            if (from && order) {
+                const moved = distance(from, src)
+                const wanted = distance(from, order)
+                if (moved >= Math.max(2, wanted * 0.6) || distance(src, order) < 2.5) survey.ready = 'open'
+                else if (distance(src, dest) < 1.2 && Date.now() - survey.sent > 700 && moved < 1.2) survey.ready = 'blocked'
+            }
+            return
+        }
         if (!survey || !survey.waiting || !survey.order || !survey.from) return
         survey.pos = src
         const moved = distance(survey.from, src)
@@ -355,6 +370,7 @@ function createGather(snapshot, emit, terrain, harvests) {
         loadedMap = map
         pendingSamples.length = 0
         survey = null
+        extent = null
         const saved = terrain && terrain.getView(map)
         settings.view = saved || null
     }
@@ -622,7 +638,45 @@ function createGather(snapshot, emit, terrain, harvests) {
         return total
     }
 
+    function noteExtent(x, y) {
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return
+        if (!extent) extent = { minX: x, maxX: x, minY: y, maxY: y }
+        extent.minX = Math.min(extent.minX, x)
+        extent.maxX = Math.max(extent.maxX, x)
+        extent.minY = Math.min(extent.minY, y)
+        extent.maxY = Math.max(extent.maxY, y)
+    }
+
+    function onMapEdge(player) {
+        if (!extent) return false
+        const span = Math.max(extent.maxX - extent.minX, extent.maxY - extent.minY)
+        if (span < 50) return false
+        const rim = 15
+        return player.x - extent.minX < rim || extent.maxX - player.x < rim
+            || player.y - extent.minY < rim || extent.maxY - player.y < rim
+    }
+
+    function axisRead(from, order, samples) {
+        let maxDx = 0
+        let maxDy = 0
+        for (const point of samples) {
+            maxDx = Math.max(maxDx, Math.abs(point.x - from.x))
+            maxDy = Math.max(maxDy, Math.abs(point.y - from.y))
+        }
+        const wantX = Math.abs(order.x - from.x) > 1.5
+        const wantY = Math.abs(order.y - from.y) > 1.5
+        return {
+            stuckX: wantX && maxDx < 0.5,
+            stuckY: wantY && maxDy < 0.5,
+            free: (!wantX || maxDx >= 1.5) && (!wantY || maxDy >= 1.5),
+        }
+    }
+
     function beginTrace(player, heading, nodeId, sweepFlag) {
+        if (onMapEdge(player)) {
+            publish('walking', 'On the outside of the map. Not measuring a dead zone.')
+            return
+        }
         survey = {
             trace: true,
             sweep: Boolean(sweepFlag),
@@ -631,12 +685,17 @@ function createGather(snapshot, emit, terrain, harvests) {
             heading,
             turn: Math.PI / 2,
             trail: [{ x: player.x, y: player.y }],
+            samples: [],
+            recheck: [],
+            stuck: false,
             walked: 0,
             steps: 0,
-            maxSteps: 24,
+            lap: 12,
+            maxSteps: 20,
+            phase: 'circle',
             waiting: false,
         }
-        publish('walking', 'Walking the outline. The inside is the dead zone once the path returns to the start.')
+        publish('walking', 'Circling to read every coordinate. A stuck X or Y is a wall.')
     }
 
     function traceStep(player, rect, now) {
@@ -645,31 +704,34 @@ function createGather(snapshot, emit, terrain, harvests) {
             const arrived = survey.order && distance(pos, survey.order) < 2.5
             const aged = now - survey.sent >= 2500
             if (!arrived && !aged && survey.ready !== 'blocked') {
-                publish('walking', `Walking the outline, ${survey.walked.toFixed(0)} m so far.`)
+                publish('walking', `Reading coordinates, ${survey.samples.length} samples.`)
                 return
             }
-            const moved = distance(survey.from, pos)
-            if (moved >= 2.5) {
+            const samples = survey.samples.length ? survey.samples : [pos]
+            const read = axisRead(survey.from, survey.order, samples)
+            if (read.stuckX || read.stuckY) survey.stuck = true
+            if (read.free && survey.phase === 'circle') survey.recheck.push(survey.order)
+            if (!read.free && survey.phase === 'recheck') survey.stuck = true
+            if (distance(survey.from, pos) >= 2) {
                 const last = survey.trail[survey.trail.length - 1]
                 if (!last || distance(last, pos) >= 2) survey.trail.push({ x: pos.x, y: pos.y })
                 survey.walked = trailLength(survey.trail)
-            } else {
-                survey.heading += survey.turn
-                publish('walking', 'That way is blocked. Turning to follow the edge.')
-            }
+            } else survey.heading += survey.turn
+            survey.samples = []
             survey.waiting = false
             survey.ready = null
             const here = survey.trail[survey.trail.length - 1]
-            const looped = survey.steps >= 4 && survey.walked >= 16 && survey.trail.length >= 4 && distance(here, survey.origin) <= 5
-            if (looped || survey.steps >= survey.maxSteps) {
+            const doneRecheck = survey.phase === 'recheck' && !survey.recheck.length
+            const looped = doneRecheck && survey.stuck && survey.walked >= 12 && survey.trail.length >= 4 && distance(here, survey.origin) <= 6
+            if (looped || survey.steps >= survey.maxSteps || (doneRecheck && survey.steps > survey.lap)) {
                 const shape = looped ? survey.trail.slice() : null
                 const nodeId = survey.nodeId
                 const sweep = survey.sweep
                 survey = null
                 if (shape && terrain) terrain.addZone(player.map, shape)
                 const detail = shape
-                    ? 'The path closed. The inside is a dead zone.'
-                    : 'The path did not close. No dead zone drawn.'
+                    ? 'The path closed on a stuck coordinate. The inside is a dead zone.'
+                    : 'No stuck coordinate held up. No dead zone drawn.'
                 if (sweep) {
                     publish('walking', detail)
                     return
@@ -677,31 +739,41 @@ function createGather(snapshot, emit, terrain, harvests) {
                 leaveNode(nodeId, 8000, 'dead zone', detail)
                 return
             }
+            if (survey.phase === 'circle' && survey.steps >= survey.lap) survey.phase = 'recheck'
+        }
+        let aim
+        if (survey.phase === 'recheck' && survey.recheck.length) aim = survey.recheck.shift()
+        else {
+            const angle = survey.heading + survey.steps * (Math.PI / 6)
+            aim = {
+                x: survey.origin.x + Math.cos(angle) * 8,
+                y: survey.origin.y + Math.sin(angle) * 8,
+            }
         }
         const threat = nearestThreat(player)
-        let aim = {
-            x: player.x + Math.cos(survey.heading) * 8,
-            y: player.y + Math.sin(survey.heading) * 8,
-        }
-        if (threat && distance(aim, threat) + 1 < distance(player, threat)) survey.heading += survey.turn
-        aim = {
-            x: player.x + Math.cos(survey.heading) * 8,
-            y: player.y + Math.sin(survey.heading) * 8,
+        if (threat && distance(aim, threat) + 1 < distance(player, threat)) {
+            const away = Math.atan2(player.y - threat.y, player.x - threat.x)
+            aim = {
+                x: player.x + Math.cos(away + survey.turn) * 8,
+                y: player.y + Math.sin(away + survey.turn) * 8,
+            }
         }
         survey.steps += 1
         survey.from = { x: player.x, y: player.y }
         survey.order = aim
         survey.pos = null
         survey.ready = null
+        survey.samples = []
         survey.sent = now
         survey.waiting = true
-        const from = tracker.predict(0.25) || player
-        if (!clickAt(projectPoint(from, aim, rect, settings), rect)) {
+        if (!clickAt(projectPoint(player, aim, rect, settings), rect)) {
             survey.waiting = false
             return
         }
         rememberClick(aim, rect)
-        publish('walking', `Walking the outline, ${survey.walked.toFixed(0)} m so far.`)
+        publish('walking', survey.phase === 'recheck'
+            ? 'Going back through a free direction to check it again.'
+            : `Circling, ${survey.steps} of ${survey.lap}.`)
     }
 
     function surveyStep(player, rect, now) {
@@ -841,6 +913,8 @@ function createGather(snapshot, emit, terrain, harvests) {
         }
         syncMap(player.map)
         tracker.update(player, now)
+        noteExtent(player.x, player.y)
+        for (const entity of view.entities) noteExtent(entity.x, entity.y)
         if (survey) {
             const place = game()
             if (!place.rect || !place.cursor) {
