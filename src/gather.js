@@ -89,6 +89,7 @@ function createGather(snapshot, emit, terrain) {
     let loadedMap = ''
     let sidestepped = false
     let sidestepFrom = null
+    let clickFrom = null
 
     function publish(status, detail) {
         if (state.status === status && state.detail === detail) return
@@ -243,6 +244,10 @@ function createGather(snapshot, emit, terrain) {
         const dest = pair(parameters[3])
         const src = pair(parameters[1])
         if (!aimOrder || !dest || !src || Date.now() - aimOrder.at > 1500) return
+        if (distance(src, dest) < 3) {
+            aimOrder = null
+            return
+        }
         pendingSamples.push({
             id: 'move',
             timestamp: Date.now(),
@@ -290,6 +295,12 @@ function createGather(snapshot, emit, terrain) {
             screen: { x: projected.x - projected.cx, y: projected.cy - projected.y },
         }
         lastOrder = worldPoint
+        const here = snapshot().player
+        clickFrom = { x: here.x, y: here.y }
+    }
+
+    function standingStill(player) {
+        return Boolean(clickFrom) && distance(player, clickFrom) < 1.5
     }
 
     function ensureMounted(want) {
@@ -540,11 +551,12 @@ function createGather(snapshot, emit, terrain) {
         if (phase !== 'harvest' && nearest && nearest.id !== state.targetId) {
             const current = view.entities.find((entity) => entity.id === state.targetId)
             const currentAway = current ? distance(player, current) : Infinity
-            if (!current || distance(player, nearest) < currentAway) {
+            if (!(current && currentAway <= 8) && (!current || distance(player, nearest) < currentAway)) {
                 state.targetId = nearest.id
                 sidestepped = false
                 sidestepFrom = null
                 lastOrder = null
+                clickFrom = null
             }
         }
 
@@ -588,7 +600,8 @@ function createGather(snapshot, emit, terrain) {
         if (!node) return
 
         const channel = Boolean(node && activeHarvestId && String(node.id) === activeHarvestId)
-        if (away <= REACH || (channel && away <= 10)) {
+        const atNode = away <= REACH || (phase === 'harvest' && away <= 8) || (channel && away <= 10)
+        if (atNode) {
             if (phase !== 'harvest') {
                 phase = 'harvest'
                 phaseSince = now
@@ -612,6 +625,12 @@ function createGather(snapshot, emit, terrain) {
             }
             const stalled = started && now - harvestSeenAt > HARVEST_STALL_MS
             const missed = !started && now - lastClick >= HARVEST_RETRY_MS
+            const recentNodeClick = lastOrder && distance(lastOrder, node) < 3 && now - lastClick < WALK_RECLICK_MS
+            if (!chargeTaken && standingStill(player) && recentNodeClick) {
+                if (harvestClicks === 0) harvestClicks = 1
+                publish('harvesting', `Standing still at ${label(node)}. Not clicking that spot again yet.`)
+                return
+            }
             if ((missed || stalled || harvestClicks === 0) && (harvestClicks === 0 || now - lastClick >= HARVEST_RETRY_MS)) {
                 if (harvestClicks > TUNE.length) {
                     missedHarvests += 1
@@ -643,6 +662,11 @@ function createGather(snapshot, emit, terrain) {
             stuck.reset(player, now)
         }
         stuck.update(player, now)
+        if (stuck.isStuck(now) && away <= 8 && !channel && !(harvestSeenAt && now - harvestSeenAt < 8000)) {
+            stuck.reset(player, now)
+            leaveNode(node.id, 8000, 'not moving', `Stopped clicking ${label(node)}. You are standing still.`)
+            return
+        }
         if (stuck.isStuck(now) && !channel && !(harvestSeenAt && now - harvestSeenAt < 8000) && !(lastOrder && distance(lastOrder, node) < 3)) {
             stuck.reset(player, now)
             const toward = Math.atan2(node.y - player.y, node.x - player.x)
@@ -670,7 +694,7 @@ function createGather(snapshot, emit, terrain) {
         }
         const close = away <= 8
         const arrived = lastOrder && distance(player, lastOrder) < 3.5
-        if (!close && lastOrder && !arrived && now - lastClick < WALK_RECLICK_MS) {
+        if ((standingStill(player) || !close) && lastOrder && !arrived && now - lastClick < WALK_RECLICK_MS) {
             if (!(settings.avoidMobs && stepHitsMob(player, lastOrder, view.entities))) {
                 noteLines(player, view.entities, node)
                 publish('walking', `Walking to ${label(node)}, ${away.toFixed(0)} m away.`)
