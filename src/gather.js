@@ -36,7 +36,13 @@ const SKIP_MS = 45000
 const HARVEST_PULSE = 52
 const HARVEST_END = 53
 const CAST_HIT = 21
-const LIFT_TRIES = 4
+const HUNT_MS = 400
+const HUNT = [
+    [0, -60], [40, -50], [-40, -50], [0, -95],
+    [55, -80], [-55, -80], [0, -125], [30, -115],
+    [-30, -115], [70, -35], [-70, -35], [0, -40],
+    [25, -145], [-25, -145],
+]
 
 function createGather(snapshot, emit, terrain, harvests) {
     const settings = {
@@ -48,6 +54,7 @@ function createGather(snapshot, emit, terrain, harvests) {
         angle: 0,
         automount: false,
         avoidMobs: true,
+        preferTier: false,
         survey: false,
         view: null,
     }
@@ -67,6 +74,7 @@ function createGather(snapshot, emit, terrain, harvests) {
     let harvestClicks = 0
     let activeHarvestId = null
     let liftIndex = 0
+    let huntAt = 0
     let noted = false
     let usingSaved = false
     let playerId = null
@@ -99,6 +107,7 @@ function createGather(snapshot, emit, terrain, harvests) {
             angle: settings.angle,
             automount: settings.automount,
             avoidMobs: settings.avoidMobs,
+            preferTier: settings.preferTier,
             survey: settings.survey,
             isometric: Boolean(settings.view),
             status: state.status,
@@ -128,6 +137,7 @@ function createGather(snapshot, emit, terrain, harvests) {
         if (Number.isFinite(angle)) settings.angle = wrapAngle(Math.max(-180, Math.min(180, angle)))
         if (typeof next.automount === 'boolean') settings.automount = next.automount
         if (typeof next.avoidMobs === 'boolean') settings.avoidMobs = next.avoidMobs
+        if (typeof next.preferTier === 'boolean') settings.preferTier = next.preferTier
         if (typeof next.survey === 'boolean') settings.survey = next.survey
         if (next.useManual) settings.view = null
         if (!settings.enabled) {
@@ -496,6 +506,14 @@ function createGather(snapshot, emit, terrain, harvests) {
         publish(status, detail)
     }
 
+    function huntAim(rect, index, ground) {
+        const cx = (rect.left + rect.right) / 2
+        const cy = (rect.top + rect.bottom) / 2
+        if (index <= 0) return ground
+        const spot = HUNT[(index - 1) % HUNT.length]
+        return { x: cx + spot[0], y: cy + spot[1], cx, cy }
+    }
+
     function surveyStep(player, rect, now) {
         if (survey.waiting) {
             const aged = now - survey.sent >= 1400
@@ -588,6 +606,7 @@ function createGather(snapshot, emit, terrain, harvests) {
                 sidestepped = false
                 sidestepFrom = null
                 liftIndex = 0
+                huntAt = 0
                 noted = false
                 lastOrder = null
                 clickFrom = null
@@ -655,12 +674,13 @@ function createGather(snapshot, emit, terrain, harvests) {
             if (chargeTaken) {
                 harvestSize = node.size
                 phaseSince = now + 1
-                harvestClicks = 0
+                harvestClicks = huntAt
                 publish('harvesting', `Charge taken from ${label(node)}. The node is still here, harvesting again.`)
             }
             const started = harvestStarted(phaseSince)
             if (started && !noted && harvestSeenAt >= lastClick && harvestSeenAt - lastClick < 3000) {
                 noted = true
+                huntAt = Math.max(0, harvestClicks - 1)
                 if (harvests) {
                     const here = clickFrom || player
                     harvests.remember(player.map, node, {
@@ -673,35 +693,27 @@ function createGather(snapshot, emit, terrain, harvests) {
                 }
             }
             const stalled = started && now - harvestSeenAt > HARVEST_STALL_MS
-            const missed = !started && now - lastClick >= HARVEST_RETRY_MS
-            const recentNodeClick = lastOrder && distance(lastOrder, node) < 3 && now - lastClick < HARVEST_HOLD_MS
-            if (!chargeTaken && standingStill(player) && recentNodeClick) {
-                if (harvestClicks === 0) harvestClicks = 1
-                publish('harvesting', `Standing still at ${label(node)}. Not clicking that spot again yet.`)
+            if (started && !stalled) {
+                publish('harvesting', `Harvesting ${label(node)}.`)
                 return
             }
-            if ((missed || stalled || harvestClicks === 0) && (harvestClicks === 0 || now - lastClick >= HARVEST_RETRY_MS)) {
-                if (harvestClicks >= LIFT_TRIES) {
-                    leaveNode(node.id, SKIP_MS, 'harvest did not start', `Skipped ${label(node)}. The cursor never landed on the resource.`, 'searching')
-                    phase = 'idle'
-                    return
-                }
-                if (harvestClicks > 0 && !started) liftIndex += 1
-                harvestClicks += 1
-                const ground = projectPoint(player, node, rect, settings)
-                const aim = liftAim(ground, harvestLift(settings, liftIndex))
-                if (!clickAt(aim, rect)) return
-                rememberClick(node, rect)
-                publish('harvesting', harvestClicks === 1 && usingSaved
-                    ? `Harvesting ${label(node)} with the saved aim.`
-                    : liftIndex === 0
-                        ? `Harvesting ${label(node)}.`
-                        : `Aiming higher on ${label(node)}.`)
+            if (harvestClicks > 0 && now - lastClick < HUNT_MS) {
+                publish('harvesting', `Searching around you for ${label(node)}.`)
                 return
             }
-            publish('harvesting', started
+            if (harvestClicks >= HUNT.length + 1) {
+                leaveNode(node.id, SKIP_MS, 'harvest did not start', `Skipped ${label(node)}. The cursor never landed on the resource.`, 'searching')
+                phase = 'idle'
+                return
+            }
+            const index = harvestClicks
+            harvestClicks += 1
+            const ground = liftAim(projectPoint(player, node, rect, settings), harvestLift(settings, liftIndex))
+            if (!clickAt(huntAim(rect, index, ground), rect)) return
+            rememberClick(node, rect)
+            publish('harvesting', index === 0
                 ? `Harvesting ${label(node)}.`
-                : `Waiting for the harvest on ${label(node)} to register.`)
+                : `Searching around you for ${label(node)}.`)
             return
         }
 

@@ -320,8 +320,10 @@ function rejection(player, entity, entities, settings, skipped, now, isBlocked) 
     return ''
 }
 
-function targetScore(player, entity) {
-    return distance(player, entity)
+function targetScore(player, entity, settings) {
+    const away = distance(player, entity)
+    if (!settings || !settings.preferTier) return away
+    return away - (entity.tier || 0) * 12
 }
 
 function pickTarget(player, entities, settings, skipped, now, isBlocked) {
@@ -329,7 +331,7 @@ function pickTarget(player, entities, settings, skipped, now, isBlocked) {
     let bestScore = Infinity
     for (const entity of entities) {
         if (rejection(player, entity, entities, settings, skipped, now, isBlocked)) continue
-        const score = targetScore(player, entity)
+        const score = targetScore(player, entity, settings)
         if (score < bestScore) {
             best = entity
             bestScore = score

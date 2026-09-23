@@ -26,11 +26,13 @@
 <header>
   <div>
     <h1>Log</h1>
-    <p>Gather messages, plus harvest, hit, and mount packets. Movement is left out. Click a gather line to keep only the traffic near it. <a href="/">Radar</a></p>
+    <p id="blurb">Gather messages, plus harvest, hit, and mount packets. Movement is left out. Click a gather line to keep only the traffic near it.</p>
+    <p><a href="/">Radar</a></p>
   </div>
   <div class="controls">
     <input id="filter" placeholder="Filter by text or code" />
     <button type="button" id="near" disabled>Show all</button>
+    <button type="button" id="debug">Debug packets</button>
     <button type="button" id="clear">Clear</button>
   </div>
 </header>
@@ -45,7 +47,17 @@ const rows = []
 const body = document.getElementById('rows')
 const filter = document.getElementById('filter')
 const near = document.getElementById('near')
+let debug = false
 let focus = null
+const blurb = document.getElementById('blurb')
+const debugButton = document.getElementById('debug')
+
+function debugText() {
+  debugButton.textContent = debug ? 'Debug packets on' : 'Debug packets'
+  blurb.textContent = debug
+    ? 'Debug is on: also logging move requests 21 and 22, harvestable event 40, and new mob event 123. Copy this page when sending a log.'
+    : 'Gather messages, plus harvest, hit, and mount packets. Movement is left out. Click a gather line to keep only the traffic near it.'
+}
 
 function time(t) {
   const d = new Date(t)
@@ -97,8 +109,19 @@ document.getElementById('clear').onclick = async () => {
   focus = null
   draw()
 }
+debugButton.onclick = async () => {
+  debug = !debug
+  debugText()
+  await fetch('/api/log/debug', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: debug }),
+  })
+}
 
 fetch('/api/log').then((res) => res.json()).then((data) => {
+  debug = Boolean(data.debug)
+  debugText()
   for (const row of data.logs) add(row)
 })
 

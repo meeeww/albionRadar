@@ -134,6 +134,7 @@
     </div>
     <label><input id="automount" type="checkbox"> Mount with A after each harvest</label>
     <label><input id="avoid-mobs" type="checkbox" checked> Avoid mobs</label>
+    <label><input id="prefer-tier" type="checkbox"> Prefer higher tier</label>
     <div class="row">
       <button type="button" id="capture-zone">Capture dead zone</button>
       <button type="button" id="undo-point">Undo point</button>
@@ -435,6 +436,7 @@ function gatherBody(enabled, useManual) {
     angle: Number(document.getElementById('angle').value),
     automount: document.getElementById('automount').checked,
     avoidMobs: document.getElementById('avoid-mobs').checked,
+    preferTier: document.getElementById('prefer-tier').checked,
     useManual,
   }
 }
@@ -503,7 +505,7 @@ document.getElementById('aim').onclick = async () => {
   document.getElementById('gather-status').textContent = data.detail || 'Aim failed.'
   draw()
 }
-document.querySelectorAll('[data-type], #min-tier, #max-tier, #automount, #avoid-mobs').forEach((input) => {
+document.querySelectorAll('[data-type], #min-tier, #max-tier, #automount, #avoid-mobs, #prefer-tier').forEach((input) => {
   input.onchange = () => { if (gathering) saveGather(true) }
 })
 document.querySelectorAll('#scale, #angle').forEach((input) => {
@@ -521,6 +523,7 @@ fetch('/api/state').then((res) => res.json()).then((data) => {
     document.getElementById('angle').value = data.gather.angle
     document.getElementById('automount').checked = Boolean(data.gather.automount)
     document.getElementById('avoid-mobs').checked = data.gather.avoidMobs !== false
+    document.getElementById('prefer-tier').checked = Boolean(data.gather.preferTier)
     for (const [name, on] of Object.entries(data.gather.types || {})) {
       const input = document.querySelector('[data-type="' + name + '"]')
       if (input) input.checked = on

@@ -115,7 +115,7 @@ function startRadar() {
 
         if (req.method === 'GET' && url.pathname === '/api/log') {
             res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' })
-            res.end(JSON.stringify({ logs }))
+            res.end(JSON.stringify({ logs, debug: debugLogs }))
             return
         }
 
@@ -123,6 +123,18 @@ function startRadar() {
             logs.length = 0
             res.writeHead(204)
             res.end()
+            return
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/log/debug') {
+            readJson(req).then((body) => {
+                if (typeof body.enabled === 'boolean') debugLogs = body.enabled
+                res.writeHead(200, { 'Content-Type': 'application/json' })
+                res.end(JSON.stringify({ debug: debugLogs }))
+            }).catch(() => {
+                res.writeHead(400)
+                res.end()
+            })
             return
         }
 
@@ -218,10 +230,18 @@ const KEPT = {
     event: new Set([6, 21, 46, 59, 60, 61, 211, 212, 213]),
 }
 
+let debugLogs = false
+const DEBUG = {
+    request: new Set([21, 22]),
+    event: new Set([40, 123]),
+}
+
 function summarize(kind, message) {
     const parameters = message?.parameters || {}
     const code = Number(kind === 'event' ? (parameters[252] ?? message.code) : (parameters[253] ?? message.operationCode))
-    if (!KEPT[kind] || !KEPT[kind].has(code)) return null
+    const kept = KEPT[kind] && KEPT[kind].has(code)
+    const extra = debugLogs && DEBUG[kind] && DEBUG[kind].has(code)
+    if (!kept && !extra) return null
     const text = [0, 1, 2, 3]
         .filter((key) => parameters[key] != null)
         .map((key) => `${key}:${brief(parameters[key])}`)
