@@ -38,10 +38,8 @@ const HARVEST_END = 53
 const CAST_HIT = 21
 const HUNT_MS = 400
 const HUNT = [
-    [0, -60], [40, -50], [-40, -50], [0, -95],
-    [55, -80], [-55, -80], [0, -125], [30, -115],
-    [-30, -115], [70, -35], [-70, -35], [0, -40],
-    [25, -145], [-25, -145],
+    [0, -24], [0, -42], [16, -32], [-16, -32],
+    [0, -58], [18, -50], [-18, -50], [0, -12],
 ]
 
 function createGather(snapshot, emit, terrain, harvests) {
@@ -75,6 +73,9 @@ function createGather(snapshot, emit, terrain, harvests) {
     let activeHarvestId = null
     let liftIndex = 0
     let huntAt = 0
+    let walkedOff = false
+    let lastAim = null
+    const hunted = new Set()
     let noted = false
     let usingSaved = false
     let playerId = null
@@ -207,6 +208,8 @@ function createGather(snapshot, emit, terrain, harvests) {
         if (kind === 'request' && code === HARVEST_END) harvestEndedAt = now
         if (kind === 'event' && code === 59) {
             harvestSeenAt = now
+            const who = shortId(parameters[0])
+            if (who) playerId = who
             if (parameters[3] != null) activeHarvestId = String(parameters[3])
         }
         if (kind === 'event' && code === 46 && parameters[0] != null) {
@@ -218,18 +221,25 @@ function createGather(snapshot, emit, terrain, harvests) {
             }
         }
         if (kind === 'event' && (code === 60 || code === 61)) harvestEndedAt = now
-        if (kind === 'request' && (code === 22 || code === 21) && parameters[0] != null) {
-            playerId = String(parameters[0])
+        if (kind === 'request' && (code === 22 || code === 21)) {
             const src = pair(parameters[1])
             const dest = pair(parameters[3])
             if (src && dest) noteMove(src, dest)
             learnClick(parameters)
         }
-        if (kind === 'event' && (code === 211 || code === 212)) mounted = true
+        if (kind === 'event' && (code === 211 || code === 212)) {
+            const who = shortId(parameters[0])
+            if (who) playerId = who
+            mounted = true
+        }
         if (kind === 'event' && code === 213) mounted = false
-        if (kind === 'event' && code === 6 && playerId && String(parameters[0]) === playerId) {
+        if (kind === 'event' && code === 6) {
+            const id = shortId(parameters[0])
             const delta = Number(parameters[2])
-            if (Number.isFinite(delta) && delta < 0) noteDamage(parameters[6])
+            if (id && Number.isFinite(delta) && delta < 0) {
+                const known = snapshot().entities.some((entity) => String(entity.id) === id)
+                if ((playerId && id === playerId) || (!playerId && !known)) noteDamage(parameters[6])
+            }
         }
         if (kind === 'event' && code === CAST_HIT) {
             if (!playerId) return
@@ -237,6 +247,13 @@ function createGather(snapshot, emit, terrain, harvests) {
             if (caster === playerId) return
             noteDamage(parameters[0])
         }
+    }
+
+    function shortId(value) {
+        if (value == null || value === '') return null
+        const text = String(value)
+        if (text.length > 12) return null
+        return text
     }
 
     function pair(value) {
@@ -248,6 +265,7 @@ function createGather(snapshot, emit, terrain, harvests) {
     }
 
     function noteMove(src, dest) {
+        if (phase === 'harvest' && distance(src, dest) > 2.5 && !(harvestSeenAt >= phaseSince)) walkedOff = true
         if (!survey || !survey.waiting || !survey.order || !survey.from) return
         survey.pos = src
         const moved = distance(survey.from, src)
@@ -329,6 +347,7 @@ function createGather(snapshot, emit, terrain, harvests) {
         if (fleeStage) return
         threatId = attackerId == null ? null : String(attackerId)
         aimOrder = null
+        survey = null
         fleeStage = 'run'
         fleeUntil = Date.now() + 5000
         publish('fleeing', 'A mob landed a hit. Running for 5 seconds, then remounting to drop focus.')
@@ -514,6 +533,14 @@ function createGather(snapshot, emit, terrain, harvests) {
         return { x: cx + spot[0], y: cy + spot[1], cx, cy }
     }
 
+    function freshAim(rect, ground) {
+        for (let n = harvestClicks; n < HUNT.length + 1; n += 1) {
+            const aim = huntAim(rect, n, ground)
+            if (!lastAim || Math.hypot(aim.x - lastAim.x, aim.y - lastAim.y) >= 14) return { index: n, aim }
+        }
+        return null
+    }
+
     function surveyStep(player, rect, now) {
         if (survey.waiting) {
             const aged = now - survey.sent >= 1400
@@ -533,8 +560,15 @@ function createGather(snapshot, emit, terrain, harvests) {
         if (survey.index >= survey.orders.length) {
             const shape = measuredZone(survey.origin, survey.blocked)
             const nodeId = survey.nodeId
+            const sweep = survey.sweep
             survey = null
             if (shape && terrain) terrain.addZone(player.map, shape)
+            if (sweep) {
+                publish('searching', shape
+                    ? 'Measured one dead zone. Looking for materials again.'
+                    : 'That direction was open. Looking for materials again.')
+                return
+            }
             leaveNode(nodeId, 8000, 'dead zone', shape
                 ? 'Measured the dead zone where walking stopped. Going around it.'
                 : 'Those steps were not a wall. Going around the node.')
@@ -555,6 +589,26 @@ function createGather(snapshot, emit, terrain, harvests) {
         }
         rememberClick(order, rect)
         publish('walking', `Measuring the dead zone, step ${survey.index} of ${survey.orders.length}.`)
+    }
+
+    let sweep = 0
+
+    function beginSweep(player) {
+        const toward = sweep * (Math.PI / 3)
+        sweep += 1
+        survey = {
+            sweep: true,
+            nodeId: null,
+            origin: { x: player.x, y: player.y },
+            orders: PROBE.map((offset) => ({
+                x: player.x + Math.cos(toward + offset) * 8,
+                y: player.y + Math.sin(toward + offset) * 8,
+            })),
+            index: 0,
+            blocked: [],
+            waiting: false,
+        }
+        publish('walking', 'No resource in range. Measuring a dead zone.')
     }
 
     function mapName() {
@@ -631,7 +685,7 @@ function createGather(snapshot, emit, terrain, harvests) {
             }
             if (!next) {
                 noteLines(player, view.entities, null)
-                publish('searching', 'No matching resource in range.')
+                beginSweep(player)
                 return
             }
         }
@@ -653,14 +707,27 @@ function createGather(snapshot, emit, terrain, harvests) {
         if (!node) return
 
         const channel = Boolean(node && activeHarvestId && String(node.id) === activeHarvestId)
+        if (walkedOff) {
+            hunted.add(String(node.id))
+            walkedOff = false
+            leaveNode(node.id, SKIP_MS, 'click walked away', `Skipped ${label(node)}. The click moved you instead of harvesting.`, 'searching')
+            phase = 'idle'
+            return
+        }
         const atNode = away <= REACH || (phase === 'harvest' && away <= 8) || (channel && away <= 10)
         if (atNode) {
             if (phase !== 'harvest') {
+                if (hunted.has(String(node.id))) {
+                    leaveNode(node.id, SKIP_MS, 'already searched', `Skipped ${label(node)}. Already searched around you for it.`, 'searching')
+                    phase = 'idle'
+                    return
+                }
                 phase = 'harvest'
                 phaseSince = now
                 harvestSize = node.size
                 harvestClicks = 0
                 noted = false
+                walkedOff = false
                 const known = harvests && harvests.find(player.map, node)
                 if (known) {
                     settings.scale = clampScale(known.scale)
@@ -701,17 +768,19 @@ function createGather(snapshot, emit, terrain, harvests) {
                 publish('harvesting', `Searching around you for ${label(node)}.`)
                 return
             }
-            if (harvestClicks >= HUNT.length + 1) {
+            const ground = liftAim(projectPoint(player, node, rect, settings), harvestLift(settings, liftIndex))
+            const next = freshAim(rect, ground)
+            if (!next) {
+                hunted.add(String(node.id))
                 leaveNode(node.id, SKIP_MS, 'harvest did not start', `Skipped ${label(node)}. The cursor never landed on the resource.`, 'searching')
                 phase = 'idle'
                 return
             }
-            const index = harvestClicks
-            harvestClicks += 1
-            const ground = liftAim(projectPoint(player, node, rect, settings), harvestLift(settings, liftIndex))
-            if (!clickAt(huntAim(rect, index, ground), rect)) return
+            harvestClicks = next.index + 1
+            lastAim = next.aim
+            if (!clickAt(next.aim, rect)) return
             rememberClick(node, rect)
-            publish('harvesting', index === 0
+            publish('harvesting', next.index === 0
                 ? `Harvesting ${label(node)}.`
                 : `Searching around you for ${label(node)}.`)
             return
