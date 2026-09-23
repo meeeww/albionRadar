@@ -1,5 +1,5 @@
 const RESOURCE_TYPES = ['wood', 'rock', 'fiber', 'hide', 'ore']
-const MOB_PADDING = 16
+const MOB_PADDING = 22
 const COMPASS = -Math.PI / 4
 
 function distance(a, b) {
@@ -171,8 +171,7 @@ function pointSegmentDistance(px, py, ax, ay, bx, by) {
 const PLAYER_RADIUS = 2
 
 function clearanceFor(entity) {
-    const radius = entity?.kind === 'mob' ? 3 : 2
-    return PLAYER_RADIUS + radius + 11
+    return entity?.kind === 'mob' ? MOB_PADDING : 8
 }
 
 function isPathBlocked(a, b, entity, clearance = clearanceFor(entity)) {
@@ -276,13 +275,8 @@ function rejection(entity, entities, settings, skipped, now, isBlocked) {
     return ''
 }
 
-function targetScore(player, entity, settings, entities) {
-    let score = distance(player, entity)
-    if (settings.avoidMobs) {
-        const threat = entities.find((other) => other.kind === 'mob' && distance(entity, other) < clearanceFor(other) * 1.5)
-        if (threat) score += 25
-    }
-    return score
+function targetScore(player, entity) {
+    return distance(player, entity)
 }
 
 function pickTarget(player, entities, settings, skipped, now, isBlocked) {
@@ -290,7 +284,7 @@ function pickTarget(player, entities, settings, skipped, now, isBlocked) {
     let bestScore = Infinity
     for (const entity of entities) {
         if (rejection(entity, entities, settings, skipped, now, isBlocked)) continue
-        const score = targetScore(player, entity, settings, entities)
+        const score = targetScore(player, entity)
         if (score < bestScore) {
             best = entity
             bestScore = score

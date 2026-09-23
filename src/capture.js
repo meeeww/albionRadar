@@ -4,7 +4,7 @@ const fs = require('fs')
 const PCAP_ERRBUF_SIZE = 256
 const DLT_EN10MB = 1
 const SNAPLEN = 65535
-const READ_TIMEOUT_MS = 5
+const READ_TIMEOUT_MS = 1
 
 const wpcap = loadWpcap()
 
@@ -168,7 +168,7 @@ function startCapture(deviceName, filter, onPayload) {
     const linkType = pcap_datalink(handle)
     const poll = () => {
         try {
-            for (let i = 0; i < 32; i++) {
+            for (let i = 0; i < 64; i++) {
                 const header = {}
                 const data = pcap_next(handle, header)
                 if (!data || !header.caplen) break

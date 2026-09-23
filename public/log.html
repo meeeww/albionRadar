@@ -26,7 +26,7 @@
 <header>
   <div>
     <h1>Log</h1>
-    <p>Gather messages and the packets around them. Click a gather line to keep only the traffic near it. <a href="/">Radar</a></p>
+    <p>Gather messages, plus harvest, hit, and mount packets. Movement is left out. Click a gather line to keep only the traffic near it. <a href="/">Radar</a></p>
   </div>
   <div class="controls">
     <input id="filter" placeholder="Filter by text or code" />
@@ -59,29 +59,34 @@ function show(row) {
   return [row.kind, row.code, row.status, row.text].join(' ').toLowerCase().includes(q)
 }
 
+function render(row) {
+  const tr = document.createElement('tr')
+  if (row.kind === 'gather') tr.className = 'gather'
+  if (focus && focus.id === row.id) tr.className += ' selected'
+  tr.innerHTML = '<td>' + time(row.t) + '</td><td>' + row.kind + '</td><td><code>' + (row.code ?? '') + '</code></td><td>' + (row.text || '') + '</td>'
+  tr.onclick = () => {
+    if (row.kind !== 'gather') return
+    focus = focus && focus.id === row.id ? null : row
+    near.disabled = !focus
+    draw()
+  }
+  return tr
+}
+
 function draw() {
   body.innerHTML = ''
   for (const row of rows) {
     if (!show(row)) continue
-    const tr = document.createElement('tr')
-    if (row.kind === 'gather') tr.className = 'gather'
-    if (focus && focus.id === row.id) tr.className += ' selected'
-    tr.innerHTML = '<td>' + time(row.t) + '</td><td>' + row.kind + '</td><td><code>' + (row.code ?? '') + '</code></td><td>' + (row.text || '') + '</td>'
-    tr.onclick = () => {
-      if (row.kind !== 'gather') return
-      focus = focus && focus.id === row.id ? null : row
-      near.disabled = !focus
-      near.textContent = focus ? 'Show all' : 'Show all'
-      draw()
-    }
-    body.appendChild(tr)
+    body.appendChild(render(row))
   }
 }
 
 function add(row) {
   rows.push(row)
   if (rows.length > 500) rows.shift()
-  draw()
+  if (show(row)) {
+    body.appendChild(render(row))
+  }
 }
 
 filter.oninput = draw

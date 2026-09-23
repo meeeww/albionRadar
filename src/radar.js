@@ -210,18 +210,25 @@ function startRadar() {
     return server
 }
 
+const KEPT = {
+    request: new Set([52, 53]),
+    event: new Set([6, 21, 46, 59, 60, 61, 211, 212, 213]),
+}
+
 function summarize(kind, message) {
     const parameters = message?.parameters || {}
-    const code = kind === 'event' ? (parameters[252] ?? message.code) : (parameters[253] ?? message.operationCode)
+    const code = Number(kind === 'event' ? (parameters[252] ?? message.code) : (parameters[253] ?? message.operationCode))
+    if (!KEPT[kind] || !KEPT[kind].has(code)) return null
     const text = [0, 1, 2, 3]
         .filter((key) => parameters[key] != null)
         .map((key) => `${key}:${brief(parameters[key])}`)
         .join(' ')
-    return { kind, code: code ?? null, text }
+    return { kind, code, text }
 }
 
 function ingest(kind, message) {
-    pushLog(summarize(kind, message))
+    const row = summarize(kind, message)
+    if (row) pushLog(row)
     world.ingest(kind, message)
 }
 

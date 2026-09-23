@@ -510,9 +510,10 @@ function createGather(snapshot, emit, terrain) {
         if (phase !== 'harvest' && nearest && nearest.id !== state.targetId) {
             const current = view.entities.find((entity) => entity.id === state.targetId)
             const currentAway = current ? distance(player, current) : Infinity
-            if (!current || distance(player, nearest) + 2 < currentAway) {
+            if (!current || distance(player, nearest) < currentAway) {
                 state.targetId = nearest.id
                 sidestepped = false
+                lastOrder = null
             }
         }
 
@@ -632,9 +633,12 @@ function createGather(snapshot, emit, terrain) {
         const close = away <= 8
         const arrived = lastOrder && distance(player, lastOrder) < 3.5
         if (!close && lastOrder && !arrived && now - lastClick < WALK_RECLICK_MS) {
-            noteLines(player, view.entities, node)
-            publish('walking', `Walking to ${label(node)}, ${away.toFixed(0)} m away.`)
-            return
+            if (!(settings.avoidMobs && stepHitsMob(player, lastOrder, view.entities))) {
+                noteLines(player, view.entities, node)
+                publish('walking', `Walking to ${label(node)}, ${away.toFixed(0)} m away.`)
+                return
+            }
+            lastOrder = null
         }
 
         syncMap(player.map)
@@ -684,7 +688,7 @@ function createGather(snapshot, emit, terrain) {
             : `Walking to ${label(node)}, ${away.toFixed(0)} m away.`)
     }
 
-    const timer = setInterval(tick, 120)
+    const timer = setInterval(tick, 40)
     if (typeof timer.unref === 'function') timer.unref()
 
     return {
