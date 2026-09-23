@@ -239,9 +239,7 @@ function steerPoint(player, node, entities, step, avoid) {
 }
 
 function mobOnNode(player, node, entities) {
-    return entities.some((entity) => isThreat(entity)
-        && distance(player, entity) < MOB_RANGE
-        && distance(node, entity) < clearanceFor(entity))
+    return entities.some((entity) => isThreat(entity) && distance(node, entity) < 8)
 }
 
 function stepHitsMob(player, step, entities) {
@@ -488,6 +486,13 @@ if (require.main === module) {
     const settings = { types: { rock: true }, minTier: 3, maxTier: 6, avoidMobs: true }
     const chosen = pickTarget(player, entities, settings, new Map(), 0)
     assert.strictEqual(chosen.id, 'near')
+    assert.strictEqual(pickTarget(
+        player,
+        [{ id: 'guarded', kind: 'resource', name: 'rock', tier: 4, x: 30, y: 0 }, { kind: 'mob', x: 33, y: 0 }],
+        { types: { rock: true }, minTier: 1, maxTier: 8, avoidMobs: true },
+        new Map(),
+        0,
+    ), null)
     const intoMob = steerPoint(player, { x: 20, y: 0 }, [{ kind: 'mob', x: 8, y: 0 }], 6, true)
     assert.ok(!intoMob || Math.hypot(intoMob.x - 8, intoMob.y) >= 16)
     const pair = solveAffine(

@@ -153,7 +153,8 @@ function createGather(snapshot, emit, terrain, harvests) {
             } else survey = null
         }
         if (next.useManual) settings.view = null
-        if (!settings.enabled && !settings.survey) {
+        if (settings.survey) publish('walking', 'Measuring dead zones. Not gathering.')
+        else if (!settings.enabled) {
             phase = 'idle'
             harvestClicks = 0
             publish('off', '')
@@ -567,13 +568,32 @@ function createGather(snapshot, emit, terrain, harvests) {
         return threat
     }
 
-    function clearOfMobs(point) {
-        return !snapshot().entities.some((entity) => entity.kind === 'mob' && !entity.passive && distance(point, entity) < clearanceFor(entity))
+    function clearOfMobs(player, point) {
+        return snapshot().entities.every((entity) => {
+            if (entity.kind !== 'mob' || entity.passive) return true
+            if (distance(point, entity) >= clearanceFor(entity)) return true
+            return distance(point, entity) > distance(player, entity) + 2
+        })
+    }
+
+    function orbitOrders(player, mob) {
+        const radius = clearanceFor(mob) + 4
+        let angle = Math.atan2(player.y - mob.y, player.x - mob.x)
+        const sign = sweep % 2 === 0 ? 1 : -1
+        const points = []
+        for (let i = 1; i <= 8; i += 1) {
+            angle += sign * (Math.PI / 6)
+            points.push({
+                x: mob.x + Math.cos(angle) * radius,
+                y: mob.y + Math.sin(angle) * radius,
+            })
+        }
+        return points
     }
 
     function surveyStep(player, rect, now) {
         const threat = nearestThreat(player)
-        if (survey.waiting && threat && distance(player, threat) < 12) {
+        if (survey.waiting && threat && survey.order && distance(player, threat) < 12 && distance(survey.order, threat) + 1 < distance(player, threat)) {
             survey.waiting = false
             survey.ready = null
         }
@@ -599,9 +619,9 @@ function createGather(snapshot, emit, terrain, harvests) {
             survey = null
             if (shape && terrain) terrain.addZone(player.map, shape)
             if (sweep) {
-                publish('searching', shape
+                publish('walking', shape
                     ? 'Measured one dead zone. Looking for materials again.'
-                    : 'That direction was open. Looking for materials again.')
+                    : 'Went around the mob. Looking for materials again.')
                 return
             }
             leaveNode(nodeId, 8000, 'dead zone', shape
@@ -610,9 +630,16 @@ function createGather(snapshot, emit, terrain, harvests) {
             return
         }
         const order = survey.orders[survey.index]
-        if (!clearOfMobs(order)) {
+        if (!clearOfMobs(player, order)) {
+            const threat = nearestThreat(player)
+            if (threat && !survey.orbit) {
+                survey.orders = orbitOrders(player, threat)
+                survey.index = 0
+                survey.orbit = true
+                publish('walking', 'Walking a circle around the mob.')
+                return
+            }
             survey.index += 1
-            publish('walking', 'That step runs into a mob. Taking another direction.')
             return
         }
         survey.index += 1
@@ -637,30 +664,28 @@ function createGather(snapshot, emit, terrain, harvests) {
         return PROBE.map((offset) => ({
             x: player.x + Math.cos(toward + offset) * 8,
             y: player.y + Math.sin(toward + offset) * 8,
-        })).filter((point) => clearOfMobs(point))
+        })).filter((point) => clearOfMobs(player, point))
     }
 
     function beginSweep(player) {
         if (fleeStage) return
-        const threat = nearestThreat(player)
-        let toward = threat && distance(player, threat) < 20
-            ? Math.atan2(player.y - threat.y, player.x - threat.x)
-            : sweep * (Math.PI / 3)
         sweep += 1
-        let orders = stepsToward(player, toward)
-        for (let turn = 1; !orders.length && turn <= 5; turn += 1) {
-            orders = stepsToward(player, toward + turn * Math.PI / 3)
-        }
-        if (!orders.length && threat) {
-            const away = Math.atan2(player.y - threat.y, player.x - threat.x)
-            orders = [{
-                x: player.x + Math.cos(away) * 12,
-                y: player.y + Math.sin(away) * 12,
-            }]
-        }
+        const threat = nearestThreat(player)
+        const closeMob = threat && distance(player, threat) < 28
+        const orders = closeMob
+            ? orbitOrders(player, threat)
+            : (() => {
+                let toward = sweep * (Math.PI / 3)
+                let steps = stepsToward(player, toward)
+                for (let turn = 1; !steps.length && turn <= 5; turn += 1) {
+                    steps = stepsToward(player, toward + turn * Math.PI / 3)
+                }
+                return steps
+            })()
         if (!orders.length) return
         survey = {
             sweep: true,
+            orbit: Boolean(closeMob),
             nodeId: null,
             origin: { x: player.x, y: player.y },
             orders,
@@ -668,8 +693,8 @@ function createGather(snapshot, emit, terrain, harvests) {
             blocked: [],
             waiting: false,
         }
-        publish('walking', threat && distance(player, threat) < 20
-            ? 'Mob nearby. Measuring the other way.'
+        publish('walking', closeMob
+            ? 'Walking a circle around the mob.'
             : 'No resource in range. Measuring a dead zone.')
     }
 

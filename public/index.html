@@ -452,7 +452,8 @@ function applyGather(data) {
   document.getElementById('gather-toggle').textContent = gathering ? 'Stop gathering' : 'Start gathering'
   document.getElementById('measure-toggle').textContent = measuring ? 'Stop measuring' : 'Measure only'
   if (!captureWait) {
-    document.getElementById('gather-status').textContent = data.detail || (gathering ? 'Looking for a node.' : 'Off. Choose what to pick up, aim the cursor, then start.')
+    document.getElementById('gather-status').textContent = data.detail
+      || (measuring ? 'Measuring dead zones. Not gathering.' : gathering ? 'Looking for a node.' : 'Off. Choose what to pick up, aim the cursor, then start.')
   }
   if (data.lines) document.getElementById('report').textContent = data.lines.join('\n')
   if (data.status === 'calibrated' || data.status === 'tuned') {
@@ -462,11 +463,11 @@ function applyGather(data) {
   draw()
 }
 
-async function saveGather(enabled, useManual) {
+async function saveGather(enabled, useManual, survey) {
   const res = await fetch('/api/gather', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(gatherBody(enabled, useManual)),
+    body: JSON.stringify(gatherBody(enabled, useManual, survey)),
   })
   applyGather(await res.json())
 }
