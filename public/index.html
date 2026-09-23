@@ -122,7 +122,7 @@
       <label>Scale <input id="scale" type="number" min="4" max="80" step="0.1" value="14"></label>
       <label>Angle <input id="angle" type="number" min="-180" max="180" value="0"></label>
     </div>
-    <p>Capture two nodes in different directions. One scale and angle cannot match the isometric camera, so the second capture fits both axes. Press Capture, then move onto the highlighted node before the countdown ends.</p>
+    <p>Capture at least three nodes in different directions. The fit uses all of them, so one bad cursor does not set the aim. Press Capture, then move onto the highlighted node before the countdown ends.</p>
     <div class="row">
       <button type="button" id="mark">Mark node</button>
       <button type="button" id="capture">Capture</button>
@@ -304,6 +304,13 @@ function draw() {
         ctx.lineTo(sb.x, sb.y)
         ctx.stroke()
       }
+    }
+    for (const mark of ground.marks || []) {
+      const spot = worldToScreen(mark.x, mark.y)
+      ctx.fillStyle = '#e39b54'
+      ctx.beginPath()
+      ctx.arc(spot.x, spot.y, 5, 0, Math.PI * 2)
+      ctx.fill()
     }
     traceZone(ground.draft, false)
     ctx.strokeStyle = '#e2c56a'
@@ -536,6 +543,7 @@ function showZones(data) {
     zones: data.zones || [],
     draft: data.draft || [],
     waitingRamp: data.waitingRamp || null,
+    marks: data.marks || [],
   }
   document.getElementById('zone-solid').hidden = !ground.waitingRamp
   if (data.closed) document.getElementById('gather-status').textContent = 'Outline closed. Click the edge that is the way up, or press Solid wall.'

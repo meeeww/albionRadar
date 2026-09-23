@@ -7,6 +7,8 @@ const GRID = 3
 
 function createTerrain(filePath, emit) {
     const maps = {}
+    const views = {}
+    const marks = {}
     let draft = null
     let saveTimer = null
     let nextId = 1
@@ -18,6 +20,8 @@ function createTerrain(filePath, emit) {
                 maps[map] = Array.isArray(zones) ? zones : []
                 for (const zone of maps[map]) nextId = Math.max(nextId, Number(zone.id) + 1)
             }
+            Object.assign(views, parsed.views || {})
+            Object.assign(marks, parsed.marks || {})
         } catch {
             return
         }
@@ -33,7 +37,7 @@ function createTerrain(filePath, emit) {
         const zones = {}
         for (const [map, list] of Object.entries(maps)) zones[map] = list
         fs.mkdirSync(path.dirname(filePath), { recursive: true })
-        fs.writeFileSync(filePath, JSON.stringify({ zones, draft }, null, 2))
+        fs.writeFileSync(filePath, JSON.stringify({ zones, views, marks, draft }, null, 2))
     }
 
     function scheduleSave() {
@@ -96,6 +100,7 @@ function createTerrain(filePath, emit) {
             })),
             draft: draft && draft.map === (map || 'unknown') ? draft.points : [],
             waitingRamp: draft && draft.waitingRamp ? draft.zoneId : null,
+            marks: marks[map || 'unknown'] || [],
         }
     }
 
@@ -169,10 +174,38 @@ function createTerrain(filePath, emit) {
         return best
     }
 
-    function route(map, from, to) {
+    function addMark(map, x, y) {
+        const key = map || 'unknown'
+        const list = marks[key] || (marks[key] = [])
+        if (list.some((point) => Math.hypot(point.x - x, point.y - y) < 3)) return view(key)
+        list.push({ x, y })
+        publish()
+        return view(key)
+    }
+
+    function setView(map, fit) {
+        views[map || 'unknown'] = fit
+        scheduleSave()
+    }
+
+    function getView(map) {
+        return views[map || 'unknown'] || null
+    }
+
+    function clearView(map) {
+        delete views[map || 'unknown']
+        scheduleSave()
+    }
+
+    function inCircle(x, y, circles) {
+        return circles.some((circle) => Math.hypot(circle.x - x, circle.y - y) < circle.r)
+    }
+
+    function route(map, from, to, circles = []) {
         const zones = body(map).filter((zone) => zone.points && zone.points.length >= 3)
-        if (!zones.length) return null
-        if (blocked(map, to.x, to.y)) return null
+        if (!zones.length && !circles.length) return null
+        const blockedAt = (x, y) => blocked(map, x, y) || inCircle(x, y, circles)
+        if (blockedAt(to.x, to.y)) return null
         const minX = Math.min(from.x, to.x) - 40
         const maxX = Math.max(from.x, to.x) + 40
         const minY = Math.min(from.y, to.y) - 40
@@ -205,7 +238,7 @@ function createTerrain(filePath, emit) {
             for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
                 const next = { x: here.x + ox * GRID, y: here.y + oy * GRID }
                 if (next.x < minX || next.x > maxX || next.y < minY || next.y > maxY) continue
-                if (blocked(map, next.x, next.y)) continue
+                if (blockedAt(next.x, next.y)) continue
                 const nextKey = key(next.x, next.y)
                 const step = Math.hypot(ox, oy) * GRID
                 const cost = walked.get(current) + step
@@ -260,6 +293,10 @@ function createTerrain(filePath, emit) {
         remove,
         nearestEdge,
         blocked,
+        addMark,
+        setView,
+        getView,
+        clearView,
         route,
         pointAlong,
         view,

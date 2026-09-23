@@ -1,25 +1,35 @@
 const { Window } = require('./window')
+const {
+    RESOURCE_TYPES,
+    clampScale,
+    wrapAngle,
+    distance,
+    projectPoint,
+    solveAffine,
+    solveView,
+    steerPoint,
+    stepHitsMob,
+    calibrationNode,
+    pickTarget,
+    nearbyNotes,
+    label,
+    clampToWindow,
+    screenSample,
+    LocalNavigator,
+    StuckDetector,
+    PlayerTracker,
+    clearanceFor,
+} = require('./gather-math')
 
-const RESOURCE_TYPES = ['wood', 'rock', 'fiber', 'hide', 'ore']
 const REACH = 4
-const WALK_STEP = 28
 const CLICK_MS = 250
-const HARVEST_GIVE_UP_MS = 14000
+const WALK_RECLICK_MS = 1600
 const HARVEST_RETRY_MS = 900
 const HARVEST_STALL_MS = 6500
 const SKIP_MS = 45000
-const STUCK_MOVE = 1.5
-const PROBE = 2
-const PROBE_MOVE = 0.8
-const STUCK_MS = 2800
-const SURROUND_RADIUS = 6
-const SURROUND_STEPS = 8
-const SURROUND_LAPS = 2
-const MOB_PADDING = 16
 const HARVEST_PULSE = 52
 const HARVEST_END = 53
 const CAST_HIT = 21
-const COMPASS = -Math.PI / 4
 const TUNE = [
     { scale: 1, angle: 12 },
     { scale: 1, angle: -12 },
@@ -37,217 +47,6 @@ const TUNE = [
     { scale: 1, angle: -40 },
 ]
 
-function viewFrom(scaleOrSettings, angleDeg) {
-    if (scaleOrSettings && typeof scaleOrSettings === 'object') return scaleOrSettings
-    return { scale: Number(scaleOrSettings) || 14, angle: Number(angleDeg) || 0, view: null }
-}
-
-function screenOffset(dx, dy, settings) {
-    if (settings.view) {
-        return {
-            sx: dx * settings.view.xx + dy * settings.view.xy,
-            sy: dx * settings.view.yx + dy * settings.view.yy,
-        }
-    }
-    const angle = COMPASS + (settings.angle || 0) * Math.PI / 180
-    const scale = settings.scale || 14
-    return {
-        sx: scale * (dx * Math.cos(angle) - dy * Math.sin(angle)),
-        sy: scale * (dx * Math.sin(angle) + dy * Math.cos(angle)),
-    }
-}
-
-function projectPoint(player, point, rect, scaleOrSettings, angleDeg) {
-    const settings = viewFrom(scaleOrSettings, angleDeg)
-    const dx = point.x - player.x
-    const dy = point.y - player.y
-    const { sx, sy } = screenOffset(dx, dy, settings)
-    const cx = (rect.left + rect.right) / 2
-    const cy = (rect.top + rect.bottom) / 2
-    return {
-        x: cx + sx,
-        y: cy - sy,
-        cx,
-        cy,
-    }
-}
-
-function solveAffine(first, second) {
-    const det = first.dx * second.dy - first.dy * second.dx
-    if (Math.abs(det) < 12) return null
-    const xx = (first.sx * second.dy - first.dy * second.sx) / det
-    const xy = (first.dx * second.sx - first.sx * second.dx) / det
-    const yx = (first.sy * second.dy - first.dy * second.sy) / det
-    const yy = (first.dx * second.sy - first.sy * second.dx) / det
-    const xAxis = Math.hypot(xx, yx)
-    const yAxis = Math.hypot(xy, yy)
-    if (xAxis < 2 || xAxis > 90 || yAxis < 2 || yAxis > 90) return null
-    return {
-        xx: Math.round(xx * 1000) / 1000,
-        xy: Math.round(xy * 1000) / 1000,
-        yx: Math.round(yx * 1000) / 1000,
-        yy: Math.round(yy * 1000) / 1000,
-    }
-}
-
-function pointSegmentDistance(px, py, ax, ay, bx, by) {
-    const abx = bx - ax
-    const aby = by - ay
-    const len2 = abx * abx + aby * aby
-    if (len2 < 0.01) return Math.hypot(px - ax, py - ay)
-    const t = Math.max(0, Math.min(1, ((px - ax) * abx + (py - ay) * aby) / len2))
-    return Math.hypot(px - (ax + abx * t), py - (ay + aby * t))
-}
-
-function mobsNearPath(ax, ay, bx, by, entities, padding) {
-    return entities.some((entity) => entity.kind === 'mob'
-        && pointSegmentDistance(entity.x, entity.y, ax, ay, bx, by) < padding)
-}
-
-function steerPoint(player, node, entities, step, avoid) {
-    const away = Math.hypot(node.x - player.x, node.y - player.y)
-    if (away < 0.2) return { x: node.x, y: node.y }
-    const stepDistance = Math.min(away, step)
-    const base = Math.atan2(node.y - player.y, node.x - player.x)
-    const offsets = avoid ? [0, 0.45, -0.45, 0.9, -0.9, 1.35, -1.35, 1.9, -1.9] : [0]
-    for (const offset of offsets) {
-        const point = {
-            x: player.x + Math.cos(base + offset) * stepDistance,
-            y: player.y + Math.sin(base + offset) * stepDistance,
-        }
-        if (!avoid || !mobsNearPath(player.x, player.y, point.x, point.y, entities, MOB_PADDING)) return point
-    }
-    return null
-}
-
-function clampToWindow(point, rect) {
-    const marginX = Math.min(80, (rect.right - rect.left) / 5)
-    const marginY = Math.min(100, (rect.bottom - rect.top) / 5)
-    return {
-        x: Math.round(Math.min(rect.right - marginX, Math.max(rect.left + marginX, point.x))),
-        y: Math.round(Math.min(rect.bottom - marginY, Math.max(rect.top + marginY, point.y))),
-    }
-}
-
-function distance(player, entity) {
-    return Math.hypot(entity.x - player.x, entity.y - player.y)
-}
-
-function surroundPoint(player, node, step, radius) {
-    const toward = Math.atan2(node.y - player.y, node.x - player.x)
-    const angle = toward + Math.PI / 2 + step * (Math.PI * 2 / SURROUND_STEPS)
-    return {
-        x: player.x + Math.cos(angle) * radius,
-        y: player.y + Math.sin(angle) * radius,
-    }
-}
-
-function solveView(player, node, cursor, rect) {
-    const dx = node.x - player.x
-    const dy = node.y - player.y
-    const world = Math.hypot(dx, dy)
-    if (world < 6) return null
-    const cx = (rect.left + rect.right) / 2
-    const cy = (rect.top + rect.bottom) / 2
-    const sx = cursor.x - cx
-    const sy = cy - cursor.y
-    const screen = Math.hypot(sx, sy)
-    if (screen < 12) return null
-    let angle = (Math.atan2(sy, sx) - Math.atan2(dy, dx)) * 180 / Math.PI
-    while (angle > 180) angle -= 360
-    while (angle < -180) angle += 360
-    return {
-        scale: Math.round((screen / world) * 10) / 10,
-        angle: Math.round(angle),
-    }
-}
-
-function differentDirection(player, node, sample) {
-    if (!sample) return true
-    const dx = node.x - player.x
-    const dy = node.y - player.y
-    const len = Math.hypot(dx, dy) * Math.hypot(sample.dx, sample.dy)
-    if (len < 1) return false
-    return (dx * sample.dx + dy * sample.dy) / len < 0.55
-}
-
-function calibrationNode(player, entities, sample) {
-    let best = null
-    let bestDistance = Infinity
-    for (const entity of entities) {
-        if (entity.kind !== 'resource') continue
-        if (sample && entity.id === sample.id) continue
-        if (sample && !differentDirection(player, entity, sample)) continue
-        const away = distance(player, entity)
-        if (away < 8 || away > 45) continue
-        if (away < bestDistance) {
-            best = entity
-            bestDistance = away
-        }
-    }
-    return best
-}
-
-function mobOnNode(node, entities) {
-    return entities.some((entity) => entity.kind === 'mob' && distance(node, entity) < MOB_PADDING)
-}
-
-function stepHitsMob(player, step, entities) {
-    if (!step) return true
-    if (mobsNearPath(player.x, player.y, step.x, step.y, entities, MOB_PADDING)) return true
-    return entities.some((entity) => entity.kind === 'mob'
-        && Math.hypot(entity.x - step.x, entity.y - step.y) < MOB_PADDING)
-}
-
-function skipRow(skipped, id) {
-    const row = skipped.get(id)
-    if (!row) return null
-    if (typeof row === 'object') return row
-    return { until: row, why: 'skipped' }
-}
-
-function rejection(entity, entities, settings, skipped, now, isBlocked) {
-    if (entity.kind !== 'resource') return 'not a resource'
-    if (entity.name !== 'resource' && !settings.types[entity.name]) return 'type is off'
-    const maxTier = settings.maxTier || 8
-    if (entity.tier > 0 && (entity.tier < settings.minTier || entity.tier > maxTier)) {
-        return `outside T${settings.minTier}–T${maxTier}`
-    }
-    const row = skipRow(skipped, entity.id)
-    if (row && row.until > now) return row.why || 'skipped'
-    if (settings.avoidMobs && mobOnNode(entity, entities)) return 'mob standing on it'
-    if (isBlocked && isBlocked(entity.x, entity.y)) return 'inside a dead zone'
-    return ''
-}
-
-function pickTarget(player, entities, settings, skipped, now, isBlocked) {
-    let best = null
-    let bestDistance = Infinity
-    for (const entity of entities) {
-        if (rejection(entity, entities, settings, skipped, now, isBlocked)) continue
-        const away = distance(player, entity)
-        if (away < bestDistance) {
-            best = entity
-            bestDistance = away
-        }
-    }
-    return best
-}
-
-function nearbyNotes(player, entities, settings, skipped, now, chosenId, isBlocked) {
-    return entities
-        .filter((entity) => entity.kind === 'resource')
-        .map((entity) => ({
-            away: distance(player, entity),
-            text: `${distance(player, entity).toFixed(0)} m  T${entity.tier || '?'} ${entity.name}`,
-            why: rejection(entity, entities, settings, skipped, now, isBlocked),
-            id: entity.id,
-        }))
-        .sort((a, b) => a.away - b.away)
-        .slice(0, 5)
-        .map((row) => row.text + (row.id === chosenId ? '  ← this one' : row.why ? `  — ${row.why}` : ''))
-}
-
 function createGather(snapshot, emit, terrain) {
     const settings = {
         enabled: false,
@@ -261,26 +60,17 @@ function createGather(snapshot, emit, terrain) {
         survey: false,
         view: null,
     }
-    const state = {
-        status: 'off',
-        targetId: null,
-        detail: '',
-        lines: [],
-        motion: '',
-    }
+    const state = { status: 'off', targetId: null, detail: '', lines: [], motion: '' }
     const skipped = new Map()
     let phase = 'idle'
     let phaseSince = 0
     let lastClick = 0
     let harvestSize = null
     let busy = false
-    let anchor = null
-    let stuckClicks = 0
-    let surroundStep = 0
-    let surroundLaps = 0
-    let surroundStartDistance = 0
-    let anchorAt = 0
-    let pendingSample = null
+    const pendingSamples = []
+    const tracker = new PlayerTracker()
+    const stuck = new StuckDetector()
+    const navigator = new LocalNavigator(terrain)
     let harvestSeenAt = 0
     let harvestEndedAt = 0
     let harvestClicks = 0
@@ -290,6 +80,12 @@ function createGather(snapshot, emit, terrain) {
     let fleeStage = null
     let fleeUntil = 0
     let threatId = null
+    let mounted = null
+    let aimOrder = null
+    let lastOrder = null
+    let missedHarvests = 0
+    let loadedMap = ''
+    let sidestepped = false
 
     function publish(status, detail) {
         if (state.status === status && state.detail === detail) return
@@ -332,16 +128,16 @@ function createGather(snapshot, emit, terrain) {
         const maxTier = Number(next.maxTier)
         if (Number.isFinite(maxTier)) settings.maxTier = Math.max(settings.minTier, Math.min(8, Math.round(maxTier)))
         const scale = Number(next.scale)
-        if (Number.isFinite(scale)) settings.scale = Math.max(4, Math.min(80, scale))
+        if (Number.isFinite(scale)) settings.scale = clampScale(scale)
         const angle = Number(next.angle)
-        if (Number.isFinite(angle)) settings.angle = Math.max(-180, Math.min(180, angle))
+        if (Number.isFinite(angle)) settings.angle = wrapAngle(Math.max(-180, Math.min(180, angle)))
         if (typeof next.automount === 'boolean') settings.automount = next.automount
         if (typeof next.avoidMobs === 'boolean') settings.avoidMobs = next.avoidMobs
         if (typeof next.survey === 'boolean') settings.survey = next.survey
         if (next.useManual) settings.view = null
         if (!settings.enabled) {
             phase = 'idle'
-            resetRoute()
+            harvestClicks = 0
             publish('off', '')
         }
         emit('gather', publicState())
@@ -356,26 +152,48 @@ function createGather(snapshot, emit, terrain) {
         }
     }
 
-    function clickAt(point, rect) {
-        const cursor = mouse()
-        if (!cursor) return false
-        const spot = clampToWindow(point, rect)
+    function game() {
+        const win = Window.getByTitle('Albion Online Client')
+        return { win, rect: win && win.getDimensions(), cursor: mouse() }
+    }
+
+    function focus(win) {
         if (!clickAt.lastFocus || Date.now() - clickAt.lastFocus > 2000) {
-            const win = Window.getByTitle('Albion Online Client')
             if (win) win.focus()
             clickAt.lastFocus = Date.now()
         }
+    }
+
+    function clickAt(point, rect) {
+        const { win, cursor } = game()
+        if (!cursor) return false
+        const spot = clampToWindow(point, rect)
+        focus(win)
         cursor.moveMouse(spot.x, spot.y)
         cursor.mouseClick('left')
         lastClick = Date.now()
         return true
     }
 
-    function observe(kind, message) {
+    function tapKey(delay) {
+        const { win, cursor } = game()
+        if (!cursor) return false
+        if (win) win.focus()
+        cursor.keyTap('a')
+        if (delay) lastClick = Date.now() + delay
+        return true
+    }
+
+    function codeOf(kind, message) {
         const parameters = message?.parameters || {}
-        const code = kind === 'request'
+        return kind === 'request'
             ? Number(parameters[253] ?? message.operationCode)
             : Number(parameters[252] ?? message.code)
+    }
+
+    function observe(kind, message) {
+        const parameters = message?.parameters || {}
+        const code = codeOf(kind, message)
         const now = Date.now()
         if (kind === 'request' && code === HARVEST_PULSE) harvestSeenAt = now
         if (kind === 'request' && code === HARVEST_END) harvestEndedAt = now
@@ -383,7 +201,10 @@ function createGather(snapshot, emit, terrain) {
         if (kind === 'event' && (code === 60 || code === 61)) harvestEndedAt = now
         if (kind === 'request' && (code === 22 || code === 21) && parameters[0] != null) {
             playerId = String(parameters[0])
+            learnClick(parameters)
         }
+        if (kind === 'event' && (code === 211 || code === 212)) mounted = true
+        if (kind === 'event' && code === 213) mounted = false
         if (kind === 'event' && code === 6 && playerId && String(parameters[0]) === playerId) {
             const delta = Number(parameters[2])
             if (Number.isFinite(delta) && delta < 0) noteDamage(parameters[6])
@@ -396,63 +217,125 @@ function createGather(snapshot, emit, terrain) {
         }
     }
 
+    function pair(value) {
+        if (!Array.isArray(value) || value.length < 2) return null
+        const x = Number(value[0])
+        const y = Number(value[1])
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+        return { x, y }
+    }
+
+    function learnClick(parameters) {
+        const dest = pair(parameters[3])
+        const src = pair(parameters[1])
+        if (!aimOrder || !dest || !src || Date.now() - aimOrder.at > 1500) return
+        pendingSamples.push({
+            id: 'move',
+            timestamp: Date.now(),
+            player: src,
+            world: dest,
+            screen: aimOrder.screen,
+        })
+        if (pendingSamples.length > 20) pendingSamples.shift()
+        aimOrder = null
+        if (pendingSamples.length >= 3) applyFit()
+    }
+
+    function applyFit() {
+        const fitted = solveAffine(pendingSamples)
+        if (!fitted) return
+        if (fitted.rmse > 12) {
+            dropFit('Aim error is too high. Capture nodes again.')
+            return
+        }
+        settings.view = fitted
+        if (terrain) terrain.setView(snapshot().player.map, fitted)
+    }
+
+    function dropFit(detail) {
+        settings.view = null
+        pendingSamples.length = 0
+        tuneIndex = 0
+        tuneBase = null
+        if (terrain) terrain.clearView(snapshot().player.map)
+        publish('tuned', detail)
+    }
+
+    function syncMap(map) {
+        if (!map || map === loadedMap) return
+        loadedMap = map
+        pendingSamples.length = 0
+        const saved = terrain && terrain.getView(map)
+        settings.view = saved || null
+    }
+
+    function rememberClick(worldPoint, rect) {
+        const projected = projectPoint(snapshot().player, worldPoint, rect, settings)
+        aimOrder = {
+            at: Date.now(),
+            screen: { x: projected.x - projected.cx, y: projected.cy - projected.y },
+        }
+        lastOrder = worldPoint
+    }
+
+    function ensureMounted(want) {
+        if (mounted === want) return false
+        tapKey(want ? 700 : 0)
+        if (mounted !== null) mounted = want
+        return true
+    }
+
     function noteDamage(attackerId) {
         if (fleeStage) return
         threatId = attackerId == null ? null : String(attackerId)
+        aimOrder = null
         fleeStage = 'run'
         fleeUntil = Date.now() + 5000
         publish('fleeing', 'A mob landed a hit. Running for 5 seconds, then remounting to drop focus.')
     }
 
-    function tapMount() {
-        const cursor = mouse()
-        if (!cursor) return false
-        const win = Window.getByTitle('Albion Online Client')
-        if (win) win.focus()
-        cursor.keyTap('a')
-        return true
+    function nearestMob(player, entities) {
+        let threat = threatId && entities.find((entity) => String(entity.id) === threatId)
+        if (threat) return threat
+        let best = Infinity
+        for (const entity of entities) {
+            if (entity.kind !== 'mob') continue
+            const away = distance(player, entity)
+            if (away < best) {
+                best = away
+                threat = entity
+            }
+        }
+        return threat
     }
 
     function fleeStep(player, entities, rect, now) {
         if (fleeStage === 'run' && now < fleeUntil) {
-            let threat = null
-            if (threatId) threat = entities.find((entity) => String(entity.id) === threatId)
-            if (!threat) {
-                let best = Infinity
-                for (const entity of entities) {
-                    if (entity.kind !== 'mob') continue
-                    const away = distance(player, entity)
-                    if (away < best) {
-                        best = away
-                        threat = entity
-                    }
-                }
-            }
-            const angle = threat
-                ? Math.atan2(player.y - threat.y, player.x - threat.x)
-                : 0
-            const dest = {
-                x: player.x + Math.cos(angle) * 22,
-                y: player.y + Math.sin(angle) * 22,
-            }
+            const threat = nearestMob(player, entities)
+            const angle = threat ? Math.atan2(player.y - threat.y, player.x - threat.x) : 0
             if (now - lastClick >= 400) {
-                const point = projectPoint(player, dest, rect, settings)
-                clickAt(point, rect)
+                clickAt(projectPoint(player, {
+                    x: player.x + Math.cos(angle) * 22,
+                    y: player.y + Math.sin(angle) * 22,
+                }, rect, settings), rect)
             }
-            const left = Math.max(0, (fleeUntil - now) / 1000)
-            publish('fleeing', `Running from the mob. Remount in ${left.toFixed(0)} s.`)
+            publish('fleeing', `Running from the mob. Remount in ${Math.max(0, (fleeUntil - now) / 1000).toFixed(0)} s.`)
             return true
         }
         if (fleeStage === 'run') {
-            tapMount()
+            if (mounted !== false) {
+                tapKey()
+                if (mounted !== null) mounted = false
+            }
             fleeStage = 'remount'
-            fleeUntil = now + 400
+            fleeUntil = now + 450
             publish('fleeing', 'Unmounting, then mounting again to drop focus.')
             return true
         }
         if (fleeStage === 'remount') {
             if (now < fleeUntil) return true
-            tapMount()
+            if (mounted !== true) tapKey()
+            mounted = true
             fleeStage = null
             threatId = null
             publish('walking', 'Mounted again. Continuing.')
@@ -461,19 +344,23 @@ function createGather(snapshot, emit, terrain) {
         return false
     }
 
-    function aim() {
+    function needPlace() {
         const view = snapshot()
         const player = view.player
-        if (!Number.isFinite(player.x)) return { ok: false, detail: 'Move once so the radar has your position.' }
-        const win = Window.getByTitle('Albion Online Client')
-        const rect = win && win.getDimensions()
-        if (!rect) return { ok: false, detail: 'Albion window not found.' }
-        const cursor = mouse()
-        if (!cursor) return { ok: false, detail: 'Mouse control is not installed.' }
+        if (!Number.isFinite(player.x)) return { error: 'Move once so the radar has your position.' }
+        const { rect, cursor } = game()
+        if (!rect) return { error: 'Albion window not found.' }
+        if (!cursor) return { error: 'Mouse control is not installed.' }
+        return { view, player, rect, cursor }
+    }
+
+    function aim() {
+        const place = needPlace()
+        if (place.error) return { ok: false, detail: place.error }
+        const { view, player, rect, cursor } = place
         const target = pickTarget(player, view.entities, settings, skipped, Date.now())
         if (!target) return { ok: false, detail: 'No matching resource in range.' }
-        const point = projectPoint(player, target, rect, settings)
-        const spot = clampToWindow(point, rect)
+        const spot = clampToWindow(projectPoint(player, target, rect, settings), rect)
         cursor.moveMouse(spot.x, spot.y)
         state.targetId = target.id
         publish('aiming', `Cursor on ${label(target)}. Adjust scale and angle until it sits on the node.`)
@@ -486,86 +373,57 @@ function createGather(snapshot, emit, terrain) {
         const view = snapshot()
         const player = view.player
         if (!Number.isFinite(player.x)) return { ok: false, detail: 'Move once so the radar has your position.' }
-        const node = calibrationNode(player, view.entities, pendingSample)
+        const node = calibrationNode(player, view.entities, pendingSamples)
         if (!node) {
-            const why = pendingSample
-                ? 'Need a second resource off to the side, about 8 to 45 m away.'
-                : 'Need a resource about 8 to 45 m away. Walk until one is on the radar.'
-            return { ok: false, detail: why }
+            return {
+                ok: false,
+                detail: pendingSamples.length
+                    ? 'Need another resource off to the side, about 8 to 45 m away.'
+                    : 'Need a resource about 8 to 45 m away. Walk until one is on the radar.',
+            }
         }
         state.targetId = node.id
-        const away = distance(player, node)
-        const step = pendingSample ? 'second node, off to the side' : 'first node'
-        publish('marking', `${label(node)} is the ${step} (${away.toFixed(0)} m). Press Capture, then move the cursor onto it.`)
+        const step = pendingSamples.length ? 'next node, off to the side' : 'first node'
+        publish('marking', `${label(node)} is the ${step} (${distance(player, node).toFixed(0)} m). Press Capture, then move the cursor onto it.`)
         return { ok: true, detail: state.detail }
     }
 
     function calibrate() {
         settings.enabled = false
         phase = 'idle'
-        const view = snapshot()
-        const player = view.player
-        if (!Number.isFinite(player.x)) return { ok: false, detail: 'Move once so the radar has your position.' }
+        const place = needPlace()
+        if (place.error) return { ok: false, detail: place.error }
+        const { view, player, rect, cursor } = place
         const node = view.entities.find((entity) => entity.id === state.targetId && entity.kind === 'resource')
         if (!node) return { ok: false, detail: 'Press Mark node first, then hover that node.' }
-        const win = Window.getByTitle('Albion Online Client')
-        const rect = win && win.getDimensions()
-        if (!rect) return { ok: false, detail: 'Albion window not found.' }
-        const cursor = mouse()
-        if (!cursor) return { ok: false, detail: 'Mouse control is not installed.' }
-        const cursorPos = cursor.getMousePos()
-        const dx = node.x - player.x
-        const dy = node.y - player.y
-        const world = Math.hypot(dx, dy)
-        const cx = (rect.left + rect.right) / 2
-        const cy = (rect.top + rect.bottom) / 2
-        const sx = cursorPos.x - cx
-        const sy = cy - cursorPos.y
-        if (world < 6 || Math.hypot(sx, sy) < 12) {
+        const sample = screenSample(player, node, cursor.getMousePos(), rect)
+        const span = Math.hypot(sample.world.x - sample.player.x, sample.world.y - sample.player.y)
+        if (span < 6 || Math.hypot(sample.screen.x, sample.screen.y) < 12) {
             return { ok: false, detail: 'The cursor was still on your character when the timer ended. Press Capture, then move onto the highlighted node before it reaches zero.' }
         }
-        const sample = { id: node.id, dx, dy, sx, sy }
-        if (!pendingSample) {
-            pendingSample = sample
-            const rough = solveView(player, node, cursorPos, rect)
-            if (rough) {
-                settings.scale = Math.max(4, Math.min(80, rough.scale))
-                settings.angle = rough.angle
-            }
-            publish('calibrated', 'First node saved. Mark a second node in a different direction, then capture it. One angle cannot fit the isometric view.')
+        pendingSamples.push(sample)
+        if (pendingSamples.length > 20) pendingSamples.shift()
+        const rough = solveView(pendingSamples)
+        if (rough) {
+            settings.scale = clampScale(rough.scale)
+            settings.angle = rough.angle
+        }
+        if (pendingSamples.length < 3) {
+            publish('calibrated', `Saved ${pendingSamples.length} of 3. Capture nodes in different directions so the fit can absorb a bad cursor.`)
             return { ok: true, detail: state.detail, scale: settings.scale, angle: settings.angle }
         }
-        const fitted = solveAffine(pendingSample, sample)
-        pendingSample = null
+        const fitted = solveAffine(pendingSamples)
         if (!fitted) {
-            return { ok: false, detail: 'Those two nodes point almost the same way. Mark one off to the side and capture again.' }
+            return { ok: false, detail: 'Those nodes point almost the same way. Mark one off to the side and capture again.' }
         }
         settings.view = fitted
-        publish('calibrated', 'Isometric view set from the two nodes. Press Aim to check the cursor.')
-        return { ok: true, detail: state.detail, scale: settings.scale, angle: settings.angle, isometric: true }
-    }
-
-    function pressMount() {
-        const cursor = mouse()
-        if (!cursor) return
-        const win = Window.getByTitle('Albion Online Client')
-        if (win) win.focus()
-        cursor.keyTap('a')
-        lastClick = Date.now() + 700
-    }
-
-    function label(entity) {
-        return `T${entity.tier || '?'} ${entity.name}`
-    }
-
-    function resetRoute() {
-        anchor = null
-        anchorAt = 0
-        stuckClicks = 0
-        surroundStep = 0
-        surroundLaps = 0
-        surroundStartDistance = 0
-        harvestClicks = 0
+        if (terrain) terrain.setView(player.map, fitted)
+        if (fitted.rmse > 8 && pendingSamples.length < 8) {
+            publish('calibrated', `Fit error ${fitted.rmse} px. Capture another node in a different direction.`)
+            return { ok: true, detail: state.detail, scale: settings.scale, angle: settings.angle, rmse: fitted.rmse }
+        }
+        publish('calibrated', `View fit from ${fitted.samples} nodes, error ${fitted.rmse} px. Press Aim to check the cursor.`)
+        return { ok: true, detail: state.detail, scale: settings.scale, angle: settings.angle, isometric: true, rmse: fitted.rmse }
     }
 
     function harvestStarted(since) {
@@ -576,46 +434,26 @@ function createGather(snapshot, emit, terrain) {
         return harvestEndedAt >= since && (harvestSeenAt < since || harvestEndedAt >= harvestSeenAt)
     }
 
-    function beginSurround(player, node, now) {
-        phase = 'surround'
-        phaseSince = now
-        surroundStep = 0
-        surroundLaps = 0
-        surroundStartDistance = distance(player, node)
-        anchor = { x: player.x, y: player.y }
-        stuckClicks = 0
-    }
-
-    function stuckTooLong(player, now) {
-        if (!anchor) {
-            anchor = { x: player.x, y: player.y }
-            anchorAt = now
-            return false
-        }
-        const moved = Math.hypot(player.x - anchor.x, player.y - anchor.y)
-        if (moved >= STUCK_MOVE) {
-            state.motion = `Last move ${moved.toFixed(1)} m`
-            anchor = { x: player.x, y: player.y }
-            anchorAt = now
-            return false
-        }
-        return now - anchorAt >= STUCK_MS
-    }
-
     function retune() {
         if (!tuneBase) tuneBase = { scale: settings.scale || 14, angle: settings.angle || 0 }
         settings.view = null
         const step = TUNE[tuneIndex % TUNE.length]
         tuneIndex += 1
-        settings.scale = Math.max(4, Math.min(80, Math.round(tuneBase.scale * step.scale * 10) / 10))
-        let angle = tuneBase.angle + step.angle
-        while (angle > 180) angle -= 360
-        while (angle < -180) angle += 360
-        settings.angle = angle
+        settings.scale = clampScale(Math.round(tuneBase.scale * step.scale * 10) / 10)
+        settings.angle = wrapAngle(tuneBase.angle + step.angle)
     }
 
     function skipFor(id, ms, why) {
         skipped.set(id, { until: Date.now() + ms, why })
+    }
+
+    function blockedAt(player) {
+        if (!terrain || !player) return null
+        return (x, y) => terrain.blocked(player.map, x, y)
+    }
+
+    function choose(player, entities, now) {
+        return pickTarget(player, entities, settings, skipped, now, blockedAt(player))
     }
 
     function noteLines(player, entities, chosen) {
@@ -628,54 +466,22 @@ function createGather(snapshot, emit, terrain) {
         ].filter(Boolean)
     }
 
-    function blockedAt(player) {
-        if (!terrain || !player) return null
-        return (x, y) => terrain.blocked(player.map, x, y)
+    function leaveNode(id, ms, why, detail, status = 'walking') {
+        skipFor(id, ms, why)
+        state.targetId = null
+        phase = 'approach'
+        const view = snapshot()
+        noteLines(view.player, view.entities, null)
+        publish(status, detail)
     }
 
     function mapName() {
         return snapshot().player.map || 'unknown'
     }
 
-    function zonesView() {
-        return terrain ? terrain.view(mapName()) : { zones: [], draft: [], waitingRamp: null }
-    }
-
-    function draftBegin() {
+    function zone(method, ...args) {
         if (!terrain) return { ok: false }
-        return terrain.begin(mapName())
-    }
-
-    function draftPoint(x, y) {
-        if (!terrain) return { ok: false }
-        return terrain.addPoint(mapName(), x, y)
-    }
-
-    function draftUndo() {
-        if (!terrain) return { ok: false }
-        return terrain.undo(mapName())
-    }
-
-    function draftCancel() {
-        if (!terrain) return { ok: false }
-        return terrain.cancel(mapName())
-    }
-
-    function markRamp(id, x, y) {
-        if (!terrain) return { ok: false }
-        const map = mapName()
-        const edge = terrain.nearestEdge(map, id, x, y)
-        return terrain.setRamp(map, id, edge)
-    }
-
-    function markSolid(id) {
-        if (!terrain) return { ok: false }
-        return terrain.setRamp(mapName(), id, null)
-    }
-
-    function removeZone(id) {
-        if (!terrain) return { ok: false }
-        return terrain.remove(mapName(), id)
+        return terrain[method](mapName(), ...args)
     }
 
     function tick() {
@@ -696,29 +502,30 @@ function createGather(snapshot, emit, terrain) {
             publish('waiting', 'Waiting for your position.')
             return
         }
+        syncMap(player.map)
+        tracker.update(player, now)
 
-        const nearest = pickTarget(player, view.entities, settings, skipped, now, blockedAt(player))
+        const nearest = choose(player, view.entities, now)
         if (phase !== 'harvest' && nearest && nearest.id !== state.targetId) {
             const current = view.entities.find((entity) => entity.id === state.targetId)
             const currentAway = current ? distance(player, current) : Infinity
             if (!current || distance(player, nearest) + 2 < currentAway) {
                 state.targetId = nearest.id
-                if (phase === 'profile') phase = 'approach'
+                sidestepped = false
             }
         }
 
         const target = view.entities.find((entity) => entity.id === state.targetId)
-        const stillWanted = target && !rejection(target, view.entities, settings, skipped, now, blockedAt(player))
-
-        if (!stillWanted) {
+        const wanted = target && pickTarget(player, [target], settings, skipped, now, blockedAt(player))
+        if (!wanted) {
             const nodeGone = phase === 'harvest'
-            if (nodeGone && settings.automount) pressMount()
-            const next = pickTarget(player, view.entities, settings, skipped, now, blockedAt(player))
+            if (nodeGone && settings.automount) ensureMounted(true)
+            const next = choose(player, view.entities, now)
             state.targetId = next ? next.id : null
             phase = 'approach'
             phaseSince = now
             harvestSize = null
-            resetRoute()
+            harvestClicks = 0
             if (nodeGone) {
                 const mounted = settings.automount ? ' Mounting.' : ''
                 publish('searching', `Node is gone from the map.${mounted} Moving to the next one.`)
@@ -733,19 +540,17 @@ function createGather(snapshot, emit, terrain) {
         const node = view.entities.find((entity) => entity.id === state.targetId)
         if (!node && !fleeStage) return
         const away = node ? distance(player, node) : Infinity
-        const win = Window.getByTitle('Albion Online Client')
-        const rect = win && win.getDimensions()
+        const { rect, cursor } = game()
         if (!rect) {
             publish('waiting', 'Albion window not found.')
             return
         }
-        if (!mouse()) {
+        if (!cursor) {
             publish('waiting', 'Mouse control is not installed. Run npm install in albionRadar.')
             return
         }
 
         if (fleeStep(player, view.entities, rect, now)) return
-
         if (!node) return
 
         if (away <= REACH) {
@@ -764,6 +569,7 @@ function createGather(snapshot, emit, terrain) {
                 publish('harvesting', `Charge taken from ${label(node)}. The node is still here, harvesting again.`)
             }
             const started = harvestStarted(phaseSince)
+            if (started) missedHarvests = 0
             if (started && tuneIndex > 0) {
                 tuneBase = { scale: settings.scale, angle: settings.angle }
                 tuneIndex = 0
@@ -773,17 +579,17 @@ function createGather(snapshot, emit, terrain) {
             const missed = !started && now - lastClick >= HARVEST_RETRY_MS
             if ((missed || stalled || harvestClicks === 0) && (harvestClicks === 0 || now - lastClick >= HARVEST_RETRY_MS)) {
                 if (harvestClicks > TUNE.length) {
-                    skipFor(node.id, SKIP_MS, 'harvest did not start')
-                    state.targetId = null
+                    missedHarvests += 1
+                    if (missedHarvests >= 2) dropFit('Several harvests missed. Clearing the camera fit.')
+                    leaveNode(node.id, SKIP_MS, 'harvest did not start', `Skipped ${label(node)}. Tried ${TUNE.length} aim corrections and none started the harvest.`, 'searching')
                     phase = 'idle'
-                    noteLines(player, view.entities, null)
-                    publish('searching', `Skipped ${label(node)}. Tried ${TUNE.length} aim corrections and none started the harvest.`)
                     return
                 }
-                if (harvestClicks > 0 && !started) retune()
-                const point = projectPoint(player, node, rect, settings)
+                if (harvestClicks > 0 && !started && !settings.view) retune()
                 harvestClicks += 1
-                if (!clickAt(point, rect)) return
+                const from = tracker.predict(0.25) || player
+                if (!clickAt(projectPoint(from, node, rect, settings), rect)) return
+                rememberClick(node, rect)
                 publish(harvestClicks === 1 ? 'harvesting' : 'tuned', harvestClicks === 1
                     ? `Harvesting ${label(node)}.`
                     : `No harvest yet. Clicking again at scale ${settings.scale}, angle ${settings.angle}.`)
@@ -798,48 +604,78 @@ function createGather(snapshot, emit, terrain) {
         if (phase !== 'approach') {
             phase = 'approach'
             phaseSince = now
-            resetRoute()
+            harvestClicks = 0
+            stuck.reset(player, now)
         }
-        if (now - lastClick < CLICK_MS) {
+        stuck.update(player, now)
+        if (stuck.isStuck(now)) {
+            stuck.reset(player, now)
+            if (!sidestepped) {
+                sidestepped = true
+                const angle = Math.atan2(node.y - player.y, node.x - player.x) + Math.PI / 2
+                const side = {
+                    x: player.x + Math.cos(angle) * 6,
+                    y: player.y + Math.sin(angle) * 6,
+                }
+                const from = tracker.predict(0.25) || player
+                if (!clickAt(projectPoint(from, side, rect, settings), rect)) return
+                rememberClick(side, rect)
+                publish('walking', `Not moving toward ${label(node)}. Stepping sideways once.`)
+                return
+            }
+            sidestepped = false
+            if (terrain) terrain.addMark(player.map, player.x, player.y)
+            leaveNode(node.id, 8000, 'stuck, repathing', `Still stuck at ${label(node)}. Marked this spot. Draw a dead zone around it if it is a wall.`)
+            return
+        }
+        const close = away <= 8
+        const arrived = lastOrder && distance(player, lastOrder) < 3.5
+        if (!close && lastOrder && !arrived && now - lastClick < WALK_RECLICK_MS) {
             noteLines(player, view.entities, node)
             publish('walking', `Walking to ${label(node)}, ${away.toFixed(0)} m away.`)
             return
         }
 
+        syncMap(player.map)
         const zones = terrain ? terrain.summary(player.map).zones : 0
+        const circles = settings.avoidMobs
+            ? view.entities.filter((entity) => entity.kind === 'mob').map((entity) => ({
+                x: entity.x,
+                y: entity.y,
+                r: clearanceFor(entity),
+            }))
+            : []
         let step = null
-        if (zones) {
+        if (zones || circles.length) {
             if (terrain.blocked(player.map, node.x, node.y)) {
-                skipFor(node.id, 20000, 'inside a dead zone')
-                state.targetId = null
-                noteLines(player, view.entities, null)
-                publish('walking', `${label(node)} is inside a dead zone. Choosing another node.`)
+                leaveNode(node.id, 20000, 'inside a dead zone', `${label(node)} is inside a dead zone. Choosing another node.`)
                 return
             }
-            const routed = terrain.route(player.map, player, node)
+            if (circles.some((circle) => Math.hypot(circle.x - node.x, circle.y - node.y) < circle.r)) {
+                leaveNode(node.id, 8000, 'mob blocking the path', `Mob blocking ${label(node)} at ${away.toFixed(0)} m. Choosing another node.`)
+                return
+            }
+            const routed = navigator.findPath(player.map, player, node, circles)
             if (!routed) {
-                skipFor(node.id, 15000, 'no path around the dead zone')
-                state.targetId = null
-                noteLines(player, view.entities, null)
-                publish('walking', `No path around the dead zone to ${label(node)}. The way up has to be the ramp edge.`)
+                leaveNode(node.id, 15000, 'no path around the dead zone', `No path around the dead zone to ${label(node)}. The way up has to be the ramp edge.`)
                 return
             }
-            step = terrain.pointAlong(routed, Math.min(away, away <= 8 ? away : 6))
+            step = navigator.nextWaypoint(player, Math.min(away, away <= 8 ? away : 6))
             if (settings.avoidMobs && stepHitsMob(player, step, view.entities)) step = null
         }
         if (!step) step = steerPoint(player, node, view.entities, away <= 8 ? away : 6, settings.avoidMobs)
         if (settings.avoidMobs && stepHitsMob(player, step, view.entities)) step = null
-        if (!step && away <= 8 && !settings.avoidMobs) step = { x: node.x, y: node.y }
+        if (close && !zones && (!settings.avoidMobs || !stepHitsMob(player, node, view.entities))) {
+            step = { x: node.x, y: node.y }
+        }
+        if (!step && close && !settings.avoidMobs) step = { x: node.x, y: node.y }
         if (!step) {
-            skipFor(node.id, 8000, 'mob blocking the path')
-            state.targetId = null
-            phase = 'approach'
-            noteLines(player, view.entities, null)
-            publish('walking', `Mob blocking ${label(node)} at ${away.toFixed(0)} m. Choosing another node.`)
+            leaveNode(node.id, 8000, 'mob blocking the path', `Mob blocking ${label(node)} at ${away.toFixed(0)} m. Choosing another node.`)
             return
         }
-        const point = projectPoint(player, step, rect, settings)
-        if (!clickAt(point, rect)) return
+        const from = tracker.predict(0.25) || player
+        if (!clickAt(projectPoint(from, step, rect, settings), rect)) return
+        rememberClick(step, rect)
         const bend = Math.abs(Math.atan2(step.y - player.y, step.x - player.x) - Math.atan2(node.y - player.y, node.x - player.x))
         noteLines(player, view.entities, node)
         publish('walking', bend > 0.35
@@ -856,14 +692,14 @@ function createGather(snapshot, emit, terrain) {
         markNode,
         calibrate,
         observe,
-        draftBegin,
-        draftPoint,
-        draftUndo,
-        draftCancel,
-        markRamp,
-        markSolid,
-        removeZone,
-        zonesView,
+        draftBegin: () => zone('begin'),
+        draftPoint: (x, y) => zone('addPoint', x, y),
+        draftUndo: () => zone('undo'),
+        draftCancel: () => zone('cancel'),
+        markRamp: (id, x, y) => terrain ? terrain.setRamp(mapName(), id, terrain.nearestEdge(mapName(), id, x, y)) : { ok: false },
+        markSolid: (id) => zone('setRamp', id, null),
+        removeZone: (id) => zone('remove', id),
+        zonesView: () => terrain ? terrain.view(mapName()) : { zones: [], draft: [], waitingRamp: null },
         publicState,
     }
 }
@@ -872,7 +708,6 @@ module.exports = {
     createGather,
     projectPoint,
     pickTarget,
-    surroundPoint,
     solveView,
     solveAffine,
     steerPoint,
