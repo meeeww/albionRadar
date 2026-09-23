@@ -151,6 +151,7 @@ function createWorld(emit) {
             tier: entity.tier ?? previous?.tier ?? 0,
             enchant: entity.enchant ?? previous?.enchant ?? 0,
             size: entity.size ?? previous?.size ?? null,
+            passive: entity.passive ?? previous?.passive ?? false,
             seen: Date.now(),
         }
         entities.set(next.id, next)
