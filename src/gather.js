@@ -36,9 +36,11 @@ const SKIP_MS = 45000
 const HARVEST_PULSE = 52
 const HARVEST_END = 53
 const CAST_HIT = 21
-const HUNT_MS = 250
+const HUNT_MS = 450
 const HUNT = [
-    [0, -12], [0, -28], [14, -18], [-14, -18],
+    [0, -20], [0, -48], [0, -76], [0, -104],
+    [24, -40], [-24, -40], [24, -72], [-24, -72],
+    [0, -128], [36, -96], [-36, -96], [0, -60],
 ]
 
 function createGather(snapshot, emit, terrain, harvests) {
@@ -76,6 +78,8 @@ function createGather(snapshot, emit, terrain, harvests) {
     let stoodPos = null
     let stoodAt = 0
     let swingNoted = 0
+    let harvestStamp = null
+    let recast = false
     let lastAim = null
     const hunted = new Set()
     let noted = false
@@ -218,12 +222,25 @@ function createGather(snapshot, emit, terrain, harvests) {
             harvestSeenAt = now
             if (parameters[1] != null) activeHarvestId = String(parameters[1])
         }
-        if (kind === 'request' && code === HARVEST_END) harvestEndedAt = now
+        if (kind === 'request' && code === HARVEST_END) {
+            harvestEndedAt = now
+            activeHarvestId = null
+            harvestStamp = null
+            recast = true
+        }
         if (kind === 'event' && code === 59) {
             harvestSeenAt = now
             const who = shortId(parameters[0])
             if (who) playerId = who
-            if (parameters[3] != null) activeHarvestId = String(parameters[3])
+            if (parameters[3] != null) {
+                activeHarvestId = String(parameters[3])
+                harvestStamp = parameters[1] == null ? null : String(parameters[1])
+                recast = false
+                if (state.targetId != null && String(state.targetId) === activeHarvestId) {
+                    phase = 'harvest'
+                    phaseSince = harvestSeenAt
+                }
+            }
         }
         if (kind === 'event' && code === 46 && parameters[0] != null) {
             const id = String(parameters[0])
@@ -233,7 +250,15 @@ function createGather(snapshot, emit, terrain, harvests) {
                 else activeHarvestId = null
             }
         }
-        if (kind === 'event' && (code === 60 || code === 61)) harvestEndedAt = now
+        if (kind === 'event' && (code === 60 || code === 61)) {
+            harvestEndedAt = now
+            const stamp = parameters[1] == null ? null : String(parameters[1])
+            if (harvestStamp && stamp === harvestStamp) {
+                harvestStamp = null
+                activeHarvestId = null
+                recast = true
+            }
+        }
         if (kind === 'request' && (code === 22 || code === 21)) {
             const src = pair(parameters[1])
             const dest = pair(parameters[3])
@@ -278,7 +303,7 @@ function createGather(snapshot, emit, terrain, harvests) {
     }
 
     function noteMove(src, dest) {
-        if (phase === 'harvest' && !activeHarvestId && distance(src, dest) > 1.2 && !(harvestSeenAt >= phaseSince)) walkedOff = true
+        if (phase === 'harvest' && !activeHarvestId && distance(src, dest) > 3 && !(harvestSeenAt >= phaseSince)) walkedOff = true
         if (!survey || !survey.waiting || !survey.order || !survey.from) return
         survey.pos = src
         const moved = distance(survey.from, src)
@@ -591,7 +616,99 @@ function createGather(snapshot, emit, terrain, harvests) {
         return points
     }
 
+    function trailLength(points) {
+        let total = 0
+        for (let i = 1; i < points.length; i += 1) total += distance(points[i - 1], points[i])
+        return total
+    }
+
+    function beginTrace(player, heading, nodeId, sweepFlag) {
+        survey = {
+            trace: true,
+            sweep: Boolean(sweepFlag),
+            nodeId: nodeId || null,
+            origin: { x: player.x, y: player.y },
+            heading,
+            turn: Math.PI / 2,
+            trail: [{ x: player.x, y: player.y }],
+            walked: 0,
+            steps: 0,
+            maxSteps: 24,
+            waiting: false,
+        }
+        publish('walking', 'Walking the outline. The inside is the dead zone once the path returns to the start.')
+    }
+
+    function traceStep(player, rect, now) {
+        if (survey.waiting) {
+            const pos = survey.pos || { x: player.x, y: player.y }
+            const arrived = survey.order && distance(pos, survey.order) < 2.5
+            const aged = now - survey.sent >= 2500
+            if (!arrived && !aged && survey.ready !== 'blocked') {
+                publish('walking', `Walking the outline, ${survey.walked.toFixed(0)} m so far.`)
+                return
+            }
+            const moved = distance(survey.from, pos)
+            if (moved >= 2.5) {
+                const last = survey.trail[survey.trail.length - 1]
+                if (!last || distance(last, pos) >= 2) survey.trail.push({ x: pos.x, y: pos.y })
+                survey.walked = trailLength(survey.trail)
+            } else {
+                survey.heading += survey.turn
+                publish('walking', 'That way is blocked. Turning to follow the edge.')
+            }
+            survey.waiting = false
+            survey.ready = null
+            const here = survey.trail[survey.trail.length - 1]
+            const looped = survey.steps >= 4 && survey.walked >= 16 && survey.trail.length >= 4 && distance(here, survey.origin) <= 5
+            if (looped || survey.steps >= survey.maxSteps) {
+                const shape = looped ? survey.trail.slice() : null
+                const nodeId = survey.nodeId
+                const sweep = survey.sweep
+                survey = null
+                if (shape && terrain) terrain.addZone(player.map, shape)
+                const detail = shape
+                    ? 'The path closed. The inside is a dead zone.'
+                    : 'The path did not close. No dead zone drawn.'
+                if (sweep) {
+                    publish('walking', detail)
+                    return
+                }
+                leaveNode(nodeId, 8000, 'dead zone', detail)
+                return
+            }
+        }
+        const threat = nearestThreat(player)
+        let aim = {
+            x: player.x + Math.cos(survey.heading) * 8,
+            y: player.y + Math.sin(survey.heading) * 8,
+        }
+        if (threat && distance(aim, threat) + 1 < distance(player, threat)) survey.heading += survey.turn
+        aim = {
+            x: player.x + Math.cos(survey.heading) * 8,
+            y: player.y + Math.sin(survey.heading) * 8,
+        }
+        survey.steps += 1
+        survey.from = { x: player.x, y: player.y }
+        survey.order = aim
+        survey.pos = null
+        survey.ready = null
+        survey.sent = now
+        survey.waiting = true
+        const from = tracker.predict(0.25) || player
+        if (!clickAt(projectPoint(from, aim, rect, settings), rect)) {
+            survey.waiting = false
+            return
+        }
+        rememberClick(aim, rect)
+        publish('walking', `Walking the outline, ${survey.walked.toFixed(0)} m so far.`)
+    }
+
     function surveyStep(player, rect, now) {
+        if (survey.trace) {
+            traceStep(player, rect, now)
+            return
+        }
         const threat = nearestThreat(player)
         if (survey.waiting && threat && survey.order && distance(player, threat) < 12 && distance(survey.order, threat) + 1 < distance(player, threat)) {
             survey.waiting = false
@@ -616,12 +733,15 @@ function createGather(snapshot, emit, terrain, harvests) {
             const shape = measuredZone(survey.origin, survey.blocked)
             const nodeId = survey.nodeId
             const sweep = survey.sweep
+            const orbit = survey.orbit
             survey = null
-            if (shape && terrain) terrain.addZone(player.map, shape)
+            if (shape && !orbit && terrain) terrain.addZone(player.map, shape)
             if (sweep) {
-                publish('walking', shape
-                    ? 'Measured one dead zone. Looking for materials again.'
-                    : 'Went around the mob. Looking for materials again.')
+                publish('walking', orbit
+                    ? 'Walked around the mob.'
+                    : shape
+                        ? 'Measured one dead zone. Looking for materials again.'
+                        : 'Went around the mob. Looking for materials again.')
                 return
             }
             leaveNode(nodeId, 8000, 'dead zone', shape
@@ -672,17 +792,11 @@ function createGather(snapshot, emit, terrain, harvests) {
         sweep += 1
         const threat = nearestThreat(player)
         const closeMob = threat && distance(player, threat) < 28
-        const orders = closeMob
-            ? orbitOrders(player, threat)
-            : (() => {
-                let toward = sweep * (Math.PI / 3)
-                let steps = stepsToward(player, toward)
-                for (let turn = 1; !steps.length && turn <= 5; turn += 1) {
-                    steps = stepsToward(player, toward + turn * Math.PI / 3)
-                }
-                return steps
-            })()
-        if (!orders.length) return
+        if (!closeMob) {
+            beginTrace(player, sweep * (Math.PI / 3), null, true)
+            return
+        }
+        const orders = orbitOrders(player, threat)
         survey = {
             sweep: true,
             orbit: Boolean(closeMob),
@@ -833,22 +947,18 @@ function createGather(snapshot, emit, terrain, harvests) {
                     usingSaved = true
                 } else usingSaved = false
             }
-            const shrunk = node.size != null && harvestSize != null && node.size < harvestSize
-            const swingEnded = harvestClicks > 0 && harvestEndedAt > swingNoted && harvestFinished(phaseSince)
-            if (shrunk || swingEnded) {
-                harvestSize = node.size
-                swingNoted = Math.max(harvestEndedAt, now)
-                const again = lastAim || liftAim(projectPoint(player, node, rect, settings), harvestLift(settings, liftIndex))
-                if (now - lastClick >= 400) {
-                    lastAim = again
-                    if (!clickAt(again, rect)) return
-                    rememberClick(node, rect)
-                }
-                publish('harvesting', `Charge taken from ${label(node)}. Staying until the node is gone.`)
+            if (node.size != null && harvestSize != null && node.size < harvestSize) harvestSize = node.size
+            if (channel) {
+                publish('harvesting', `Harvesting ${label(node)}. Staying until the node is gone.`)
                 return
             }
-            if (channel) {
-                publish('harvesting', `Harvesting ${label(node)}.`)
+            if (recast && (node.size == null || node.size > 0)) {
+                recast = false
+                const again = liftAim(projectPoint(player, node, rect, settings), harvestLift(settings, liftIndex))
+                lastAim = again
+                if (!clickAt(again, rect)) return
+                rememberClick(node, rect)
+                publish('harvesting', `Harvesting ${label(node)} again.`)
                 return
             }
             const started = harvestStarted(phaseSince)
@@ -872,7 +982,7 @@ function createGather(snapshot, emit, terrain, harvests) {
                 return
             }
             if (harvestClicks > 0 && now - lastClick < HUNT_MS) {
-                publish('harvesting', `Searching around you for ${label(node)}.`)
+                publish('harvesting', `Clicking ${label(node)} again.`)
                 return
             }
             const ground = liftAim(projectPoint(player, node, rect, settings), harvestLift(settings, liftIndex))
@@ -889,7 +999,7 @@ function createGather(snapshot, emit, terrain, harvests) {
             rememberClick(node, rect)
             publish('harvesting', next.index === 0
                 ? `Harvesting ${label(node)}.`
-                : `Searching around you for ${label(node)}.`)
+                : `Clicking ${label(node)} again.`)
             return
         }
 
@@ -907,19 +1017,12 @@ function createGather(snapshot, emit, terrain, harvests) {
             } else if (now - stoodAt > 1500) {
                 stoodPos = null
                 stuck.reset(player, now)
-                const toward = Math.atan2(node.y - player.y, node.x - player.x)
-                survey = {
-                    nodeId: node.id,
-                    origin: { x: player.x, y: player.y },
-                    orders: PROBE.map((offset) => ({
-                        x: player.x + Math.cos(toward + offset) * 8,
-                        y: player.y + Math.sin(toward + offset) * 8,
-                    })),
-                    index: 0,
-                    blocked: [],
-                    waiting: false,
+                const threat = nearestThreat(player)
+                if (threat && distance(player, threat) < 18) {
+                    leaveNode(node.id, 12000, 'mob in the way', `Mob blocking the way to ${label(node)}. Going around it.`)
+                    return
                 }
-                publish('walking', 'Not moving. Measuring the dead zone instead of switching nodes.')
+                beginTrace(player, Math.atan2(node.y - player.y, node.x - player.x), node.id, false)
                 return
             }
         } else if (!(lastOrder && distance(lastOrder, node) < 3)) stoodPos = null
@@ -945,19 +1048,7 @@ function createGather(snapshot, emit, terrain, harvests) {
                 leaveNode(node.id, 12000, 'mob in the way', `Mob blocking the way to ${label(node)}. Going around it.`)
                 return
             }
-            const toward = Math.atan2(node.y - player.y, node.x - player.x)
-            survey = {
-                nodeId: node.id,
-                origin: { x: player.x, y: player.y },
-                orders: PROBE.map((offset) => ({
-                    x: player.x + Math.cos(toward + offset) * 8,
-                    y: player.y + Math.sin(toward + offset) * 8,
-                })),
-                index: 0,
-                blocked: [],
-                waiting: false,
-            }
-            publish('walking', 'Path stopped short. Measuring the dead zone before gathering again.')
+            beginTrace(player, Math.atan2(node.y - player.y, node.x - player.x), node.id, false)
             return
         }
         const close = away <= 8
