@@ -553,15 +553,29 @@ function createGather(snapshot, emit, terrain, harvests) {
         return null
     }
 
-    function hostileNear(player, range) {
-        return snapshot().entities.some((entity) => entity.kind === 'mob' && !entity.passive && distance(player, entity) < range)
+    function nearestThreat(player) {
+        let threat = null
+        let best = Infinity
+        for (const entity of snapshot().entities) {
+            if (entity.kind !== 'mob' || entity.passive) continue
+            const away = distance(player, entity)
+            if (away < best) {
+                best = away
+                threat = entity
+            }
+        }
+        return threat
+    }
+
+    function clearOfMobs(point) {
+        return !snapshot().entities.some((entity) => entity.kind === 'mob' && !entity.passive && distance(point, entity) < clearanceFor(entity))
     }
 
     function surveyStep(player, rect, now) {
-        if (hostileNear(player, 16)) {
-            survey = null
-            publish('walking', 'A mob is here. Staying out of it instead of measuring a dead zone.')
-            return
+        const threat = nearestThreat(player)
+        if (survey.waiting && threat && distance(player, threat) < 12) {
+            survey.waiting = false
+            survey.ready = null
         }
         if (survey.waiting) {
             const aged = now - survey.sent >= 1400
@@ -596,6 +610,11 @@ function createGather(snapshot, emit, terrain, harvests) {
             return
         }
         const order = survey.orders[survey.index]
+        if (!clearOfMobs(order)) {
+            survey.index += 1
+            publish('walking', 'That step runs into a mob. Taking another direction.')
+            return
+        }
         survey.index += 1
         survey.from = { x: player.x, y: player.y }
         survey.order = order
@@ -614,26 +633,44 @@ function createGather(snapshot, emit, terrain, harvests) {
 
     let sweep = 0
 
+    function stepsToward(player, toward) {
+        return PROBE.map((offset) => ({
+            x: player.x + Math.cos(toward + offset) * 8,
+            y: player.y + Math.sin(toward + offset) * 8,
+        })).filter((point) => clearOfMobs(point))
+    }
+
     function beginSweep(player) {
-        if (fleeStage || hostileNear(player, 20)) {
-            publish('searching', 'A mob is nearby. Waiting instead of measuring a dead zone.')
-            return
-        }
-        const toward = sweep * (Math.PI / 3)
+        if (fleeStage) return
+        const threat = nearestThreat(player)
+        let toward = threat && distance(player, threat) < 20
+            ? Math.atan2(player.y - threat.y, player.x - threat.x)
+            : sweep * (Math.PI / 3)
         sweep += 1
+        let orders = stepsToward(player, toward)
+        for (let turn = 1; !orders.length && turn <= 5; turn += 1) {
+            orders = stepsToward(player, toward + turn * Math.PI / 3)
+        }
+        if (!orders.length && threat) {
+            const away = Math.atan2(player.y - threat.y, player.x - threat.x)
+            orders = [{
+                x: player.x + Math.cos(away) * 12,
+                y: player.y + Math.sin(away) * 12,
+            }]
+        }
+        if (!orders.length) return
         survey = {
             sweep: true,
             nodeId: null,
             origin: { x: player.x, y: player.y },
-            orders: PROBE.map((offset) => ({
-                x: player.x + Math.cos(toward + offset) * 8,
-                y: player.y + Math.sin(toward + offset) * 8,
-            })),
+            orders,
             index: 0,
             blocked: [],
             waiting: false,
         }
-        publish('walking', 'No resource in range. Measuring a dead zone.')
+        publish('walking', threat && distance(player, threat) < 20
+            ? 'Mob nearby. Measuring the other way.'
+            : 'No resource in range. Measuring a dead zone.')
     }
 
     function mapName() {
@@ -878,8 +915,9 @@ function createGather(snapshot, emit, terrain, harvests) {
         }
         if (stuck.isStuck(now) && !channel) {
             stuck.reset(player, now)
-            if (hostileNear(player, 18)) {
-                leaveNode(node.id, 12000, 'mob in the way', `Mob blocking the way to ${label(node)}. Staying out of it.`)
+            const threat = nearestThreat(player)
+            if (threat && distance(player, threat) < 18) {
+                leaveNode(node.id, 12000, 'mob in the way', `Mob blocking the way to ${label(node)}. Going around it.`)
                 return
             }
             const toward = Math.atan2(node.y - player.y, node.x - player.x)
