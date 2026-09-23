@@ -75,6 +75,7 @@ function createGather(snapshot, emit, terrain) {
     let harvestSeenAt = 0
     let harvestEndedAt = 0
     let harvestClicks = 0
+    let activeHarvestId = null
     let tuneBase = null
     let tuneIndex = 0
     let playerId = null
@@ -87,6 +88,7 @@ function createGather(snapshot, emit, terrain) {
     let missedHarvests = 0
     let loadedMap = ''
     let sidestepped = false
+    let sidestepFrom = null
 
     function publish(status, detail) {
         if (state.status === status && state.detail === detail) return
@@ -196,9 +198,20 @@ function createGather(snapshot, emit, terrain) {
         const parameters = message?.parameters || {}
         const code = codeOf(kind, message)
         const now = Date.now()
-        if (kind === 'request' && code === HARVEST_PULSE) harvestSeenAt = now
+        if (kind === 'request' && code === HARVEST_PULSE) {
+            harvestSeenAt = now
+            if (parameters[1] != null) activeHarvestId = String(parameters[1])
+        }
         if (kind === 'request' && code === HARVEST_END) harvestEndedAt = now
-        if (kind === 'event' && code === 59) harvestSeenAt = now
+        if (kind === 'event' && code === 59) {
+            harvestSeenAt = now
+            if (parameters[3] != null) activeHarvestId = String(parameters[3])
+        }
+        if (kind === 'event' && code === 46 && parameters[0] != null) {
+            const size = Number(parameters[1])
+            if (Number.isFinite(size) && size > 0) harvestSeenAt = now
+            else activeHarvestId = null
+        }
         if (kind === 'event' && (code === 60 || code === 61)) harvestEndedAt = now
         if (kind === 'request' && (code === 22 || code === 21) && parameters[0] != null) {
             playerId = String(parameters[0])
@@ -476,6 +489,23 @@ function createGather(snapshot, emit, terrain) {
         publish(status, detail)
     }
 
+    function barrier(player, toward) {
+        const nx = Math.cos(toward)
+        const ny = Math.sin(toward)
+        const px = -ny
+        const py = nx
+        const cx = player.x + nx * 4
+        const cy = player.y + ny * 4
+        const halfW = 6
+        const halfD = 2
+        return [
+            { x: cx + px * halfW - nx * halfD, y: cy + py * halfW - ny * halfD },
+            { x: cx - px * halfW - nx * halfD, y: cy - py * halfW - ny * halfD },
+            { x: cx - px * halfW + nx * halfD, y: cy - py * halfW + ny * halfD },
+            { x: cx + px * halfW + nx * halfD, y: cy + py * halfW + ny * halfD },
+        ]
+    }
+
     function mapName() {
         return snapshot().player.map || 'unknown'
     }
@@ -513,6 +543,7 @@ function createGather(snapshot, emit, terrain) {
             if (!current || distance(player, nearest) < currentAway) {
                 state.targetId = nearest.id
                 sidestepped = false
+                sidestepFrom = null
                 lastOrder = null
             }
         }
@@ -528,6 +559,7 @@ function createGather(snapshot, emit, terrain) {
             phaseSince = now
             harvestSize = null
             harvestClicks = 0
+            activeHarvestId = null
             if (nodeGone) {
                 const mounted = settings.automount ? ' Mounting.' : ''
                 publish('searching', `Node is gone from the map.${mounted} Moving to the next one.`)
@@ -555,7 +587,8 @@ function createGather(snapshot, emit, terrain) {
         if (fleeStep(player, view.entities, rect, now)) return
         if (!node) return
 
-        if (away <= REACH) {
+        const channel = Boolean(node && activeHarvestId && String(node.id) === activeHarvestId)
+        if (away <= REACH || (channel && away <= 10)) {
             if (phase !== 'harvest') {
                 phase = 'harvest'
                 phaseSince = now
@@ -587,7 +620,7 @@ function createGather(snapshot, emit, terrain) {
                     phase = 'idle'
                     return
                 }
-                if (harvestClicks > 0 && !started && !settings.view) retune()
+                if (harvestClicks > 0 && !started) retune()
                 harvestClicks += 1
                 const from = tracker.predict(0.25) || player
                 if (!clickAt(projectPoint(from, node, rect, settings), rect)) return
@@ -610,24 +643,29 @@ function createGather(snapshot, emit, terrain) {
             stuck.reset(player, now)
         }
         stuck.update(player, now)
-        if (stuck.isStuck(now)) {
+        if (stuck.isStuck(now) && !channel && !(harvestSeenAt && now - harvestSeenAt < 8000) && !(lastOrder && distance(lastOrder, node) < 3)) {
             stuck.reset(player, now)
+            const toward = Math.atan2(node.y - player.y, node.x - player.x)
             if (!sidestepped) {
                 sidestepped = true
-                const angle = Math.atan2(node.y - player.y, node.x - player.x) + Math.PI / 2
+                sidestepFrom = { x: player.x, y: player.y }
                 const side = {
-                    x: player.x + Math.cos(angle) * 6,
-                    y: player.y + Math.sin(angle) * 6,
+                    x: player.x + Math.cos(toward + Math.PI / 2) * 6,
+                    y: player.y + Math.sin(toward + Math.PI / 2) * 6,
                 }
                 const from = tracker.predict(0.25) || player
                 if (!clickAt(projectPoint(from, side, rect, settings), rect)) return
                 rememberClick(side, rect)
-                publish('walking', `Not moving toward ${label(node)}. Stepping sideways once.`)
+                publish('walking', `Not moving toward ${label(node)}. Stepping sideways to see if this is a wall.`)
                 return
             }
+            const slid = sidestepFrom && distance(player, sidestepFrom) >= 1.5
             sidestepped = false
-            if (terrain) terrain.addMark(player.map, player.x, player.y)
-            leaveNode(node.id, 8000, 'stuck, repathing', `Still stuck at ${label(node)}. Marked this spot. Draw a dead zone around it if it is a wall.`)
+            sidestepFrom = null
+            if (terrain) terrain.addZone(player.map, barrier(player, toward))
+            leaveNode(node.id, 8000, slid ? 'wall' : 'cliff', slid
+                ? `Wall in front of ${label(node)}. Drew it; the path goes around.`
+                : `Cliff in front of ${label(node)}. Drew the face; the path goes around it. Mark the green edge later if there is a way up.`)
             return
         }
         const close = away <= 8

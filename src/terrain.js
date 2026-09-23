@@ -174,6 +174,14 @@ function createTerrain(filePath, emit) {
         return best
     }
 
+    function addZone(map, points, ramp = null) {
+        const key = map || 'unknown'
+        if (!Array.isArray(points) || points.length < 3) return view(key)
+        body(key).push({ id: nextId++, points, ramp })
+        publish()
+        return view(key)
+    }
+
     function addMark(map, x, y) {
         const key = map || 'unknown'
         const list = marks[key] || (marks[key] = [])
@@ -293,6 +301,7 @@ function createTerrain(filePath, emit) {
         remove,
         nearestEdge,
         blocked,
+        addZone,
         addMark,
         setView,
         getView,
