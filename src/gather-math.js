@@ -168,8 +168,6 @@ function pointSegmentDistance(px, py, ax, ay, bx, by) {
     return Math.hypot(px - (ax + abx * t), py - (ay + aby * t))
 }
 
-const PLAYER_RADIUS = 2
-
 function clearanceFor(entity) {
     return entity?.kind === 'mob' ? MOB_PADDING : 8
 }
