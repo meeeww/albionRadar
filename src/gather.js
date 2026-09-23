@@ -687,51 +687,68 @@ function createGather(snapshot, emit, terrain, harvests) {
             trail: [{ x: player.x, y: player.y }],
             samples: [],
             recheck: [],
+            corners: [],
+            axes: [],
             stuck: false,
             walked: 0,
             steps: 0,
-            lap: 12,
-            maxSteps: 20,
-            phase: 'circle',
+            maxSteps: 36,
             waiting: false,
         }
-        publish('walking', 'Circling to read every coordinate. A stuck X or Y is a wall.')
+        publish('walking', 'Circling and reading every coordinate. A stuck X or Y is the wall.')
     }
 
     function traceStep(player, rect, now) {
         if (survey.waiting) {
             const pos = survey.pos || { x: player.x, y: player.y }
-            const arrived = survey.order && distance(pos, survey.order) < 2.5
-            const aged = now - survey.sent >= 2500
+            const arrived = survey.order && distance(pos, survey.order) < 2
+            const aged = now - survey.sent >= 2800
             if (!arrived && !aged && survey.ready !== 'blocked') {
-                publish('walking', `Reading coordinates, ${survey.samples.length} samples.`)
+                publish('walking', `Reading ${survey.samples.length} coordinates.`)
                 return
             }
             const samples = survey.samples.length ? survey.samples : [pos]
             const read = axisRead(survey.from, survey.order, samples)
-            if (read.stuckX || read.stuckY) survey.stuck = true
-            if (read.free && survey.phase === 'circle') survey.recheck.push(survey.order)
-            if (!read.free && survey.phase === 'recheck') survey.stuck = true
-            if (distance(survey.from, pos) >= 2) {
-                const last = survey.trail[survey.trail.length - 1]
-                if (!last || distance(last, pos) >= 2) survey.trail.push({ x: pos.x, y: pos.y })
-                survey.walked = trailLength(survey.trail)
+            const moved = distance(survey.from, pos)
+            let axis = null
+            if (read.stuckX && !read.stuckY) axis = `x:${pos.x.toFixed(1)}`
+            else if (read.stuckY && !read.stuckX) axis = `y:${pos.y.toFixed(1)}`
+            if (axis) {
+                survey.stuck = true
+                if (survey.axes[survey.axes.length - 1] !== axis) {
+                    survey.axes.push(axis)
+                    survey.corners.push({ x: pos.x, y: pos.y })
+                }
+                const slide = read.stuckX
+                    ? Math.sign(pos.y - survey.from.y) || 1
+                    : Math.sign(pos.x - survey.from.x) || 1
+                survey.heading = read.stuckX
+                    ? (slide > 0 ? Math.PI / 2 : -Math.PI / 2)
+                    : (slide > 0 ? 0 : Math.PI)
+            } else if (read.free && moved >= 2) {
+                survey.recheck.push(survey.order)
+                survey.heading += Math.PI / 8
             } else survey.heading += survey.turn
+            if (moved >= 1.5) {
+                const last = survey.trail[survey.trail.length - 1]
+                if (!last || distance(last, pos) >= 1.5) survey.trail.push({ x: pos.x, y: pos.y })
+                survey.walked = trailLength(survey.trail)
+            }
             survey.samples = []
             survey.waiting = false
             survey.ready = null
             const here = survey.trail[survey.trail.length - 1]
-            const doneRecheck = survey.phase === 'recheck' && !survey.recheck.length
-            const looped = doneRecheck && survey.stuck && survey.walked >= 12 && survey.trail.length >= 4 && distance(here, survey.origin) <= 6
-            if (looped || survey.steps >= survey.maxSteps || (doneRecheck && survey.steps > survey.lap)) {
-                const shape = looped ? survey.trail.slice() : null
+            const looped = survey.stuck && survey.axes.length >= 2 && survey.corners.length >= 3
+                && survey.walked >= 18 && distance(here, survey.origin) <= 6
+            if (looped || survey.steps >= survey.maxSteps) {
+                const shape = looped ? survey.corners.slice() : null
                 const nodeId = survey.nodeId
                 const sweep = survey.sweep
                 survey = null
                 if (shape && terrain) terrain.addZone(player.map, shape)
                 const detail = shape
-                    ? 'The path closed on a stuck coordinate. The inside is a dead zone.'
-                    : 'No stuck coordinate held up. No dead zone drawn.'
+                    ? 'The wall closed. The inside is a dead zone.'
+                    : 'The path did not close around a wall. No dead zone drawn.'
                 if (sweep) {
                     publish('walking', detail)
                     return
@@ -739,23 +756,22 @@ function createGather(snapshot, emit, terrain, harvests) {
                 leaveNode(nodeId, 8000, 'dead zone', detail)
                 return
             }
-            if (survey.phase === 'circle' && survey.steps >= survey.lap) survey.phase = 'recheck'
-        }
-        let aim
-        if (survey.phase === 'recheck' && survey.recheck.length) aim = survey.recheck.shift()
-        else {
-            const angle = survey.heading + survey.steps * (Math.PI / 6)
-            aim = {
-                x: survey.origin.x + Math.cos(angle) * 8,
-                y: survey.origin.y + Math.sin(angle) * 8,
+            if (survey.recheck.length && survey.steps % 4 === 0) {
+                publish('walking', 'That way was open. Going back to check it again.')
             }
         }
+        let aim = survey.recheck.length && survey.steps % 4 === 0
+            ? survey.recheck.shift()
+            : {
+                x: player.x + Math.cos(survey.heading) * 6,
+                y: player.y + Math.sin(survey.heading) * 6,
+            }
         const threat = nearestThreat(player)
         if (threat && distance(aim, threat) + 1 < distance(player, threat)) {
             const away = Math.atan2(player.y - threat.y, player.x - threat.x)
             aim = {
-                x: player.x + Math.cos(away + survey.turn) * 8,
-                y: player.y + Math.sin(away + survey.turn) * 8,
+                x: player.x + Math.cos(away + Math.PI / 2) * 8,
+                y: player.y + Math.sin(away + Math.PI / 2) * 8,
             }
         }
         survey.steps += 1
@@ -771,9 +787,8 @@ function createGather(snapshot, emit, terrain, harvests) {
             return
         }
         rememberClick(aim, rect)
-        publish('walking', survey.phase === 'recheck'
-            ? 'Going back through a free direction to check it again.'
-            : `Circling, ${survey.steps} of ${survey.lap}.`)
+        const wall = survey.axes.length ? survey.axes[survey.axes.length - 1] : 'none yet'
+        publish('walking', `Following the edge. Stuck line ${wall}. ${survey.samples.length} coordinates.`)
     }
 
     function surveyStep(player, rect, now) {
