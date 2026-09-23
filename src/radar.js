@@ -151,8 +151,8 @@ function startRadar() {
         throw error
     })
 
-    server.listen(PORT, '127.0.0.1', () => {
-        console.log(`Radar: http://127.0.0.1:${PORT}`)
+    server.listen(PORT, '0.0.0.0', () => {
+        console.log(`Radar: http://0.0.0.0:${PORT}`)
     })
 
     setInterval(() => world.prune(3 * 60 * 1000), 15000)

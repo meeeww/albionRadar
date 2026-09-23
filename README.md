@@ -24,7 +24,7 @@ Install [Npcap](https://npcap.com/), then:
 npm start
 ```
 
-Pick the network adapter Albion uses. The radar opens at http://127.0.0.1:4789. Walk into a zone and move once so your position locks to the center. Changing maps clears the previous zone.
+Pick the network adapter Albion uses. The radar listens on every network interface at port 4789. Open it from this PC or any device on the same network. Walk into a zone and move once so your position locks to the center. Changing maps clears the previous zone.
 
 ### Thanks
 
