@@ -3,6 +3,7 @@ const fs = require('fs')
 const path = require('path')
 const { createWorld } = require('./world')
 const { createGather } = require('./gather')
+const { createHarvests } = require('./harvests')
 const { createTerrain } = require('./terrain')
 
 const PORT = Number(process.env.PACKET_PORT) || 4789
@@ -55,7 +56,7 @@ function send(event, data) {
 
 const world = createWorld(send)
 const terrain = createTerrain(path.join(__dirname, '..', 'data', 'terrain.json'), send)
-const gather = createGather(() => world.snapshot(), send, terrain)
+const gather = createGather(() => world.snapshot(), send, terrain, createHarvests(path.join(__dirname, '..', 'data', 'harvests.json')))
 
 function readJson(req) {
     return new Promise((resolve, reject) => {
@@ -176,6 +177,8 @@ function startRadar() {
                 else if (action === 'ramp') result = gather.markRamp(body.id, body.x, body.y)
                 else if (action === 'solid') result = gather.markSolid(body.id)
                 else if (action === 'remove') result = gather.removeZone(body.id)
+                else if (action === 'delete') result = gather.deleteZoneAt(body.x, body.y)
+                else if (action === 'clear') result = gather.clearZones()
                 else {
                     res.writeHead(404)
                     res.end()

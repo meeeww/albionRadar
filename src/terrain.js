@@ -157,6 +157,21 @@ function createTerrain(filePath, emit) {
         return view(map)
     }
 
+    function zoneAt(map, x, y) {
+        const list = body(map)
+        for (let i = list.length - 1; i >= 0; i--) {
+            if (list[i].points && inside(list[i].points, x, y)) return list[i].id
+        }
+        return null
+    }
+
+    function clear(map) {
+        maps[map || 'unknown'] = []
+        if (draft && draft.map === (map || 'unknown')) draft = null
+        publish()
+        return view(map)
+    }
+
     function nearestEdge(map, id, x, y) {
         const zone = body(map).find((item) => item.id === Number(id))
         if (!zone) return -1
@@ -299,6 +314,8 @@ function createTerrain(filePath, emit) {
         cancel,
         setRamp,
         remove,
+        zoneAt,
+        clear,
         nearestEdge,
         blocked,
         addZone,

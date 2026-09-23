@@ -5,6 +5,8 @@ const {
     wrapAngle,
     distance,
     projectPoint,
+    harvestLift,
+    liftAim,
     solveAffine,
     solveView,
     steerPoint,
@@ -23,32 +25,18 @@ const {
 
 const REACH = 4
 const CLICK_MS = 250
-const WALK_RECLICK_MS = 4000
-const WALK_STEP = 24
+const WALK_RECLICK_MS = 600
+const HARVEST_HOLD_MS = 4000
+const WALK_STEP = 12
 const HARVEST_RETRY_MS = 900
 const HARVEST_STALL_MS = 6500
 const SKIP_MS = 45000
 const HARVEST_PULSE = 52
 const HARVEST_END = 53
 const CAST_HIT = 21
-const TUNE = [
-    { scale: 1, angle: 12 },
-    { scale: 1, angle: -12 },
-    { scale: 1, angle: 24 },
-    { scale: 1, angle: -24 },
-    { scale: 0.8, angle: 0 },
-    { scale: 1.25, angle: 0 },
-    { scale: 0.8, angle: 18 },
-    { scale: 0.8, angle: -18 },
-    { scale: 1.25, angle: 18 },
-    { scale: 1.25, angle: -18 },
-    { scale: 1.5, angle: 0 },
-    { scale: 0.65, angle: 0 },
-    { scale: 1, angle: 40 },
-    { scale: 1, angle: -40 },
-]
+const LIFT_TRIES = 4
 
-function createGather(snapshot, emit, terrain) {
+function createGather(snapshot, emit, terrain, harvests) {
     const settings = {
         enabled: false,
         types: { wood: true, rock: true, fiber: true, hide: true, ore: true },
@@ -76,8 +64,9 @@ function createGather(snapshot, emit, terrain) {
     let harvestEndedAt = 0
     let harvestClicks = 0
     let activeHarvestId = null
-    let tuneBase = null
-    let tuneIndex = 0
+    let liftIndex = 0
+    let noted = false
+    let usingSaved = false
     let playerId = null
     let fleeStage = null
     let fleeUntil = 0
@@ -85,7 +74,6 @@ function createGather(snapshot, emit, terrain) {
     let mounted = null
     let aimOrder = null
     let lastOrder = null
-    let missedHarvests = 0
     let loadedMap = ''
     let sidestepped = false
     let sidestepFrom = null
@@ -277,8 +265,6 @@ function createGather(snapshot, emit, terrain) {
     function dropFit(detail) {
         settings.view = null
         pendingSamples.length = 0
-        tuneIndex = 0
-        tuneBase = null
         if (terrain) terrain.clearView(snapshot().player.map)
         publish('tuned', detail)
     }
@@ -327,7 +313,7 @@ function createGather(snapshot, emit, terrain) {
         if (threat) return threat
         let best = Infinity
         for (const entity of entities) {
-            if (entity.kind !== 'mob') continue
+            if (entity.kind !== 'mob' || entity.passive) continue
             const away = distance(player, entity)
             if (away < best) {
                 best = away
@@ -462,15 +448,6 @@ function createGather(snapshot, emit, terrain) {
         return harvestEndedAt >= since && (harvestSeenAt < since || harvestEndedAt >= harvestSeenAt)
     }
 
-    function retune() {
-        if (!tuneBase) tuneBase = { scale: settings.scale || 14, angle: settings.angle || 0 }
-        settings.view = null
-        const step = TUNE[tuneIndex % TUNE.length]
-        tuneIndex += 1
-        settings.scale = clampScale(Math.round(tuneBase.scale * step.scale * 10) / 10)
-        settings.angle = wrapAngle(tuneBase.angle + step.angle)
-    }
-
     function skipFor(id, ms, why) {
         skipped.set(id, { until: Date.now() + ms, why })
     }
@@ -558,6 +535,8 @@ function createGather(snapshot, emit, terrain) {
                 state.targetId = nearest.id
                 sidestepped = false
                 sidestepFrom = null
+                liftIndex = 0
+                noted = false
                 lastOrder = null
                 clickFrom = null
             }
@@ -610,6 +589,14 @@ function createGather(snapshot, emit, terrain) {
                 phaseSince = now
                 harvestSize = node.size
                 harvestClicks = 0
+                noted = false
+                const known = harvests && harvests.find(player.map, node)
+                if (known) {
+                    settings.scale = clampScale(known.scale)
+                    settings.angle = wrapAngle(known.angle)
+                    liftIndex = known.lift || 0
+                    usingSaved = true
+                } else usingSaved = false
             }
             const chargeTaken = (node.size != null && harvestSize != null && node.size < harvestSize)
                 || (harvestClicks > 0 && harvestFinished(phaseSince))
@@ -620,36 +607,35 @@ function createGather(snapshot, emit, terrain) {
                 publish('harvesting', `Charge taken from ${label(node)}. The node is still here, harvesting again.`)
             }
             const started = harvestStarted(phaseSince)
-            if (started) missedHarvests = 0
-            if (started && tuneIndex > 0) {
-                tuneBase = { scale: settings.scale, angle: settings.angle }
-                tuneIndex = 0
-                publish('tuned', `Harvest registered. Keeping scale ${settings.scale} and angle ${settings.angle}.`)
+            if (started && !noted && harvestSeenAt >= lastClick && harvestSeenAt - lastClick < 3000) {
+                noted = true
+                if (harvests) harvests.remember(player.map, node, { scale: settings.scale, angle: settings.angle, lift: liftIndex })
             }
             const stalled = started && now - harvestSeenAt > HARVEST_STALL_MS
             const missed = !started && now - lastClick >= HARVEST_RETRY_MS
-            const recentNodeClick = lastOrder && distance(lastOrder, node) < 3 && now - lastClick < WALK_RECLICK_MS
+            const recentNodeClick = lastOrder && distance(lastOrder, node) < 3 && now - lastClick < HARVEST_HOLD_MS
             if (!chargeTaken && standingStill(player) && recentNodeClick) {
                 if (harvestClicks === 0) harvestClicks = 1
                 publish('harvesting', `Standing still at ${label(node)}. Not clicking that spot again yet.`)
                 return
             }
             if ((missed || stalled || harvestClicks === 0) && (harvestClicks === 0 || now - lastClick >= HARVEST_RETRY_MS)) {
-                if (harvestClicks > TUNE.length) {
-                    missedHarvests += 1
-                    if (missedHarvests >= 2) dropFit('Several harvests missed. Clearing the camera fit.')
-                    leaveNode(node.id, SKIP_MS, 'harvest did not start', `Skipped ${label(node)}. Tried ${TUNE.length} aim corrections and none started the harvest.`, 'searching')
+                if (harvestClicks >= LIFT_TRIES) {
+                    leaveNode(node.id, SKIP_MS, 'harvest did not start', `Skipped ${label(node)}. The cursor never landed on the resource.`, 'searching')
                     phase = 'idle'
                     return
                 }
-                if (harvestClicks > 0 && !started) retune()
+                if (harvestClicks > 0 && !started) liftIndex += 1
                 harvestClicks += 1
-                const from = tracker.predict(0.25) || player
-                if (!clickAt(projectPoint(from, node, rect, settings), rect)) return
+                const ground = projectPoint(player, node, rect, settings)
+                const aim = liftAim(ground, harvestLift(settings, liftIndex))
+                if (!clickAt(aim, rect)) return
                 rememberClick(node, rect)
-                publish(harvestClicks === 1 ? 'harvesting' : 'tuned', harvestClicks === 1
-                    ? `Harvesting ${label(node)}.`
-                    : `No harvest yet. Clicking again at scale ${settings.scale}, angle ${settings.angle}.`)
+                publish('harvesting', harvestClicks === 1 && usingSaved
+                    ? `Harvesting ${label(node)} with the saved aim.`
+                    : liftIndex === 0
+                        ? `Harvesting ${label(node)}.`
+                        : `Aiming higher on ${label(node)}.`)
                 return
             }
             publish('harvesting', started
@@ -703,7 +689,7 @@ function createGather(snapshot, emit, terrain) {
         }
         const close = away <= 8
         const arrived = lastOrder && distance(player, lastOrder) < 3.5
-        if ((standingStill(player) || !close) && lastOrder && !arrived && now - lastClick < WALK_RECLICK_MS) {
+        if (lastOrder && !arrived && now - lastClick < WALK_RECLICK_MS) {
             if (!(settings.avoidMobs && stepHitsMob(player, lastOrder, view.entities))) {
                 noteLines(player, view.entities, node)
                 publish('walking', `Walking to ${label(node)}, ${away.toFixed(0)} m away.`)
@@ -715,7 +701,7 @@ function createGather(snapshot, emit, terrain) {
         syncMap(player.map)
         const zones = terrain ? terrain.summary(player.map).zones : 0
         const circles = settings.avoidMobs
-            ? view.entities.filter((entity) => entity.kind === 'mob').map((entity) => ({
+            ? view.entities.filter((entity) => entity.kind === 'mob' && !entity.passive && distance(player, entity) < 15).map((entity) => ({
                 x: entity.x,
                 y: entity.y,
                 r: clearanceFor(entity),
@@ -775,6 +761,13 @@ function createGather(snapshot, emit, terrain) {
         markRamp: (id, x, y) => terrain ? terrain.setRamp(mapName(), id, terrain.nearestEdge(mapName(), id, x, y)) : { ok: false },
         markSolid: (id) => zone('setRamp', id, null),
         removeZone: (id) => zone('remove', id),
+        deleteZoneAt: (x, y) => {
+            if (!terrain) return { ok: false }
+            const id = terrain.zoneAt(mapName(), x, y)
+            if (id == null) return terrain.view(mapName())
+            return terrain.remove(mapName(), id)
+        },
+        clearZones: () => zone('clear'),
         zonesView: () => terrain ? terrain.view(mapName()) : { zones: [], draft: [], waitingRamp: null },
         publicState,
     }

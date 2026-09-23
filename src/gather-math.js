@@ -1,5 +1,6 @@
 const RESOURCE_TYPES = ['wood', 'rock', 'fiber', 'hide', 'ore']
 const MOB_PADDING = 22
+const MOB_RANGE = 15
 const COMPASS = -Math.PI / 4
 
 function distance(a, b) {
@@ -43,6 +44,24 @@ function projectPoint(player, point, rect, scaleOrSettings, angleDeg) {
     const cx = (rect.left + rect.right) / 2
     const cy = (rect.top + rect.bottom) / 2
     return { x: cx + sx, y: cy - sy, cx, cy }
+}
+
+// ponytail: the mesh sits above its ground point on an orthographic camera.
+// A few fixed heights; a saved view's upward shift already counts. Upgrade path is a per-node height.
+const HARVEST_LIFT_M = [5, 7.5, 10, 3.5]
+
+function harvestLift(settings, index = 0) {
+    const view = settings && settings.view
+    const scale = view
+        ? (Math.hypot(view.xx, view.yx) || settings.scale || 14)
+        : ((settings && settings.scale) || 14)
+    const wanted = scale * HARVEST_LIFT_M[Math.abs(index) % HARVEST_LIFT_M.length]
+    const already = view ? Math.max(0, view.ty || 0) : 0
+    return Math.max(0, Math.round(wanted - already))
+}
+
+function liftAim(point, lift) {
+    return { x: point.x, y: point.y - Math.max(0, Math.round(lift)), cx: point.cx, cy: point.cy }
 }
 
 function affineRow(sample) {
@@ -168,6 +187,10 @@ function pointSegmentDistance(px, py, ax, ay, bx, by) {
     return Math.hypot(px - (ax + abx * t), py - (ay + aby * t))
 }
 
+function isThreat(entity) {
+    return entity?.kind === 'mob' && !entity.passive
+}
+
 function clearanceFor(entity) {
     return entity?.kind === 'mob' ? MOB_PADDING : 8
 }
@@ -177,8 +200,10 @@ function isPathBlocked(a, b, entity, clearance = clearanceFor(entity)) {
 }
 
 function mobsNearPath(ax, ay, bx, by, entities, padding) {
-    return entities.some((entity) => entity.kind === 'mob'
-        && isPathBlocked({ x: ax, y: ay }, { x: bx, y: by }, entity, padding ?? clearanceFor(entity)))
+    const origin = { x: ax, y: ay }
+    return entities.some((entity) => isThreat(entity)
+        && distance(origin, entity) < MOB_RANGE
+        && isPathBlocked(origin, { x: bx, y: by }, entity, padding ?? clearanceFor(entity)))
 }
 
 function steerPoint(player, node, entities, step, avoid) {
@@ -197,24 +222,30 @@ function steerPoint(player, node, entities, step, avoid) {
     return null
 }
 
-function mobOnNode(node, entities) {
-    return entities.some((entity) => entity.kind === 'mob' && distance(node, entity) < clearanceFor(entity))
+function mobOnNode(player, node, entities) {
+    return entities.some((entity) => isThreat(entity)
+        && distance(player, entity) < MOB_RANGE
+        && distance(node, entity) < clearanceFor(entity))
 }
 
 function stepHitsMob(player, step, entities) {
     if (!step) return true
-    return entities.some((entity) => entity.kind === 'mob' && (
+    return entities.some((entity) => isThreat(entity) && distance(player, entity) < MOB_RANGE && (
         isPathBlocked(player, step, entity) || distance(step, entity) < clearanceFor(entity)
     ))
 }
 
 function clampToWindow(point, rect) {
-    const marginX = Math.min(80, (rect.right - rect.left) / 5)
-    const marginY = Math.min(100, (rect.bottom - rect.top) / 5)
-    return {
-        x: Math.round(Math.min(rect.right - marginX, Math.max(rect.left + marginX, point.x))),
-        y: Math.round(Math.min(rect.bottom - marginY, Math.max(rect.top + marginY, point.y))),
-    }
+    const cx = (rect.left + rect.right) / 2
+    const cy = (rect.top + rect.bottom) / 2
+    const maxX = Math.min(200, (rect.right - rect.left) * 0.21)
+    const maxY = Math.min(150, (rect.bottom - rect.top) * 0.19)
+    let x = point.x - cx
+    let y = point.y - cy
+    const limit = Math.min(1, maxX / Math.max(Math.abs(x), 1), maxY / Math.max(Math.abs(y), 1))
+    x *= limit
+    y *= limit
+    return { x: Math.round(cx + x), y: Math.round(cy + y) }
 }
 
 function sampleOffset(sample) {
@@ -259,7 +290,7 @@ function skipRow(skipped, id) {
     return { until: row, why: 'skipped' }
 }
 
-function rejection(entity, entities, settings, skipped, now, isBlocked) {
+function rejection(player, entity, entities, settings, skipped, now, isBlocked) {
     if (entity.kind !== 'resource') return 'not a resource'
     if (entity.name !== 'resource' && !settings.types[entity.name]) return 'type is off'
     const maxTier = settings.maxTier || 8
@@ -268,7 +299,7 @@ function rejection(entity, entities, settings, skipped, now, isBlocked) {
     }
     const row = skipRow(skipped, entity.id)
     if (row && row.until > now) return row.why || 'skipped'
-    if (settings.avoidMobs && mobOnNode(entity, entities)) return 'mob standing on it'
+    if (settings.avoidMobs && mobOnNode(player, entity, entities)) return 'mob standing on it'
     if (isBlocked && isBlocked(entity.x, entity.y)) return 'inside a dead zone'
     return ''
 }
@@ -281,7 +312,7 @@ function pickTarget(player, entities, settings, skipped, now, isBlocked) {
     let best = null
     let bestScore = Infinity
     for (const entity of entities) {
-        if (rejection(entity, entities, settings, skipped, now, isBlocked)) continue
+        if (rejection(player, entity, entities, settings, skipped, now, isBlocked)) continue
         const score = targetScore(player, entity)
         if (score < bestScore) {
             best = entity
@@ -301,7 +332,7 @@ function nearbyNotes(player, entities, settings, skipped, now, chosenId, isBlock
         .map((entity) => ({
             away: distance(player, entity),
             text: `${distance(player, entity).toFixed(0)} m  ${label(entity)}`,
-            why: rejection(entity, entities, settings, skipped, now, isBlocked),
+            why: rejection(player, entity, entities, settings, skipped, now, isBlocked),
             id: entity.id,
         }))
         .sort((a, b) => a.away - b.away)
@@ -406,6 +437,8 @@ module.exports = {
     wrapAngle,
     distance,
     projectPoint,
+    harvestLift,
+    liftAim,
     solveAffine,
     solveView,
     steerPoint,
@@ -452,5 +485,17 @@ if (require.main === module) {
     assert.ok(fitted.rmse < 1)
     assert.strictEqual(fitted.tx, 2)
     assert.strictEqual(fitted.ty, 2)
+    const ground = projectPoint(player, { x: 2, y: -2 }, { left: 0, top: 0, right: 200, bottom: 200 }, { scale: 14, angle: 0 })
+    const aimed = liftAim(ground, harvestLift({ scale: 14, angle: 0 }, 0))
+    assert.strictEqual(aimed.x, ground.x)
+    assert.strictEqual(aimed.y, ground.y - Math.round(14 * 5))
+    assert.ok(aimed.y < ground.cy)
+    assert.strictEqual(harvestLift({ scale: 14, view: { xx: 14, yx: 0, ty: 200 } }, 0), 0)
+    assert.strictEqual(stepHitsMob({ x: 0, y: 0 }, { x: 10, y: 0 }, [{ kind: 'mob', x: 40, y: 0 }]), false)
+    assert.strictEqual(stepHitsMob({ x: 0, y: 0 }, { x: 10, y: 0 }, [{ kind: 'mob', x: 8, y: 0 }]), true)
+    assert.strictEqual(stepHitsMob({ x: 0, y: 0 }, { x: 10, y: 0 }, [{ kind: 'mob', passive: true, x: 8, y: 0 }]), false)
+    const pulled = clampToWindow({ x: 900, y: 20 }, { left: 0, top: 0, right: 1000, bottom: 800 })
+    assert.ok(Math.abs(pulled.x - 500) <= 200)
+    assert.ok(Math.abs(pulled.y - 400) <= 150)
     console.log('gather-math ok')
 }

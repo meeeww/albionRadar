@@ -139,8 +139,10 @@
       <button type="button" id="undo-point">Undo point</button>
       <button type="button" id="zone-solid" hidden>Solid wall</button>
       <button type="button" id="remove-zone">Remove last zone</button>
+      <button type="button" id="delete-zone">Delete zone</button>
+      <button type="button" id="clear-zones">Clear zones</button>
     </div>
-    <p id="zone-help">Click Capture dead zone, then click around a cliff or rock on the radar. When you click near the first point, the outline closes and that inside becomes a no-go. Then click the one edge that is the way up, or press Solid wall.</p>
+    <p id="zone-help">Click Capture dead zone, then click around a cliff or rock on the radar. When you click near the first point, the outline closes and that inside becomes a no-go. Then click the one edge that is the way up, or press Solid wall. Delete zone, then click a red area to remove that one. Clear zones removes every dead zone on this map.</p>
     <pre id="report"></pre>
     <div class="row">
       <button type="button" id="gather-toggle">Start gathering</button>
@@ -159,6 +161,7 @@ let gathering = false
 let captureWait = false
 let ground = { zones: [], draft: [], waitingRamp: null }
 let capturingZone = false
+let deletingZone = false
 const canvas = document.getElementById('map')
 const ctx = canvas.getContext('2d')
 const list = document.getElementById('list')
@@ -576,6 +579,20 @@ function screenToWorld(event) {
 canvas.onclick = async (event) => {
   if (!hasPlayer()) return
   const world = screenToWorld(event)
+  if (deletingZone) {
+    const res = await fetch('/api/terrain/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(world),
+    })
+    const data = await res.json()
+    const removed = (ground.zones || []).length > (data.zones || []).length
+    showZones(data)
+    document.getElementById('gather-status').textContent = removed
+      ? 'Deleted that dead zone.'
+      : 'No dead zone under that click.'
+    return
+  }
   if (ground.waitingRamp) {
     const res = await fetch('/api/terrain/ramp', {
       method: 'POST',
@@ -598,6 +615,10 @@ canvas.onclick = async (event) => {
 
 document.getElementById('capture-zone').onclick = async () => {
   capturingZone = !capturingZone
+  if (capturingZone) {
+    deletingZone = false
+    document.getElementById('delete-zone').textContent = 'Delete zone'
+  }
   document.getElementById('capture-zone').textContent = capturingZone ? 'Stop capturing' : 'Capture dead zone'
   if (capturingZone) {
     const res = await fetch('/api/terrain/begin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
@@ -628,6 +649,24 @@ document.getElementById('remove-zone').onclick = async () => {
     body: JSON.stringify({ id: last.id }),
   })
   showZones(await res.json())
+}
+document.getElementById('delete-zone').onclick = () => {
+  deletingZone = !deletingZone
+  if (deletingZone) capturingZone = false
+  document.getElementById('delete-zone').textContent = deletingZone ? 'Stop deleting' : 'Delete zone'
+  document.getElementById('capture-zone').textContent = 'Capture dead zone'
+  document.getElementById('gather-status').textContent = deletingZone
+    ? 'Click a red dead zone on the radar to delete it.'
+    : 'Delete mode is off.'
+}
+document.getElementById('clear-zones').onclick = async () => {
+  const res = await fetch('/api/terrain/clear', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  showZones(await res.json())
+  document.getElementById('gather-status').textContent = 'Cleared the dead zones on this map.'
 }
 </script>
 </body>

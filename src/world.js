@@ -1,4 +1,4 @@
-const VIEW_LIMIT = 110
+const { isGatheringMob } = require('./critters')
 const MOVE_JUMP_LIMIT = 60
 
 const Event = {
@@ -270,15 +270,17 @@ function createWorld(emit) {
             if (!id || !spot) return
             const portal = typeof parameters[33] === 'string' ? parameters[33] : ''
             const mist = portal.toUpperCase().startsWith('MISTS_')
+            const typeId = parameters[1]
             upsert({
                 id,
                 kind: mist ? 'mist' : 'mob',
                 x: spot[0],
                 y: spot[1],
-                name: mist ? portal : '',
+                name: mist ? portal : (typeof typeId === 'string' ? typeId : ''),
                 tier: 0,
                 enchant: Number(parameters[34]) || 0,
                 size: null,
+                passive: !mist && isGatheringMob(typeId),
             })
             return
         }
