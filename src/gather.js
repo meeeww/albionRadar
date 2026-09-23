@@ -23,7 +23,8 @@ const {
 
 const REACH = 4
 const CLICK_MS = 250
-const WALK_RECLICK_MS = 1600
+const WALK_RECLICK_MS = 4000
+const WALK_STEP = 24
 const HARVEST_RETRY_MS = 900
 const HARVEST_STALL_MS = 6500
 const SKIP_MS = 45000
@@ -660,10 +661,10 @@ function createGather(snapshot, emit, terrain) {
                 leaveNode(node.id, 15000, 'no path around the dead zone', `No path around the dead zone to ${label(node)}. The way up has to be the ramp edge.`)
                 return
             }
-            step = navigator.nextWaypoint(player, Math.min(away, away <= 8 ? away : 6))
+            step = navigator.nextWaypoint(player, Math.min(away, close ? away : WALK_STEP))
             if (settings.avoidMobs && stepHitsMob(player, step, view.entities)) step = null
         }
-        if (!step) step = steerPoint(player, node, view.entities, away <= 8 ? away : 6, settings.avoidMobs)
+        if (!step) step = steerPoint(player, node, view.entities, close ? away : WALK_STEP, settings.avoidMobs)
         if (settings.avoidMobs && stepHitsMob(player, step, view.entities)) step = null
         if (close && !zones && (!settings.avoidMobs || !stepHitsMob(player, node, view.entities))) {
             step = { x: node.x, y: node.y }

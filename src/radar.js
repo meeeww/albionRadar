@@ -7,10 +7,42 @@ const { createTerrain } = require('./terrain')
 
 const PORT = Number(process.env.PACKET_PORT) || 4789
 const PAGE = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'))
+const LOG_PAGE = fs.readFileSync(path.join(__dirname, '..', 'public', 'log.html'))
 
 const clients = new Set()
+const logs = []
+let logId = 1
+
+function brief(value) {
+    if (value == null || value === '') return ''
+    if (typeof value === 'bigint') return value.toString()
+    if (typeof value === 'number') return String(Math.round(value * 100) / 100)
+    if (Array.isArray(value)) {
+        if (value.length <= 4) return JSON.stringify(value.map((item) => typeof item === 'number' ? Math.round(item * 100) / 100 : item)).slice(0, 80)
+        return `[${value.length}]`
+    }
+    if (typeof value === 'object') return '{…}'
+    return String(value).slice(0, 40)
+}
+
+function pushLog(entry) {
+    const row = { id: logId++, t: Date.now(), ...entry }
+    logs.push(row)
+    if (logs.length > 500) logs.shift()
+    const payload = `event: log\ndata: ${JSON.stringify(row)}\n\n`
+    for (const client of clients) {
+        try {
+            client.write(payload)
+        } catch {
+            clients.delete(client)
+        }
+    }
+}
 
 function send(event, data) {
+    if (event === 'gather' && data && data.detail) {
+        pushLog({ kind: 'gather', status: data.status, text: data.detail })
+    }
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
     for (const client of clients) {
         try {
@@ -45,6 +77,12 @@ function startRadar() {
     const server = http.createServer((req, res) => {
         const url = new URL(req.url, `http://127.0.0.1:${PORT}`)
 
+        if (req.method === 'GET' && url.pathname === '/log') {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' })
+            res.end(LOG_PAGE)
+            return
+        }
+
         if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/radar')) {
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' })
             res.end(PAGE)
@@ -71,6 +109,19 @@ function startRadar() {
             res.write('\n')
             clients.add(res)
             req.on('close', () => clients.delete(res))
+            return
+        }
+
+        if (req.method === 'GET' && url.pathname === '/api/log') {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' })
+            res.end(JSON.stringify({ logs }))
+            return
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/log/clear') {
+            logs.length = 0
+            res.writeHead(204)
+            res.end()
             return
         }
 
@@ -159,12 +210,27 @@ function startRadar() {
     return server
 }
 
+function summarize(kind, message) {
+    const parameters = message?.parameters || {}
+    const code = kind === 'event' ? (parameters[252] ?? message.code) : (parameters[253] ?? message.operationCode)
+    const text = [0, 1, 2, 3]
+        .filter((key) => parameters[key] != null)
+        .map((key) => `${key}:${brief(parameters[key])}`)
+        .join(' ')
+    return { kind, code: code ?? null, text }
+}
+
+function ingest(kind, message) {
+    pushLog(summarize(kind, message))
+    world.ingest(kind, message)
+}
+
 function observe(kind, message) {
     gather.observe(kind, message)
 }
 
 module.exports = {
     startRadar,
-    ingest: world.ingest,
+    ingest,
     observe,
 }
