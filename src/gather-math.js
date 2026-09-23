@@ -206,6 +206,22 @@ function mobsNearPath(ax, ay, bx, by, entities, padding) {
         && isPathBlocked(origin, { x: bx, y: by }, entity, padding ?? clearanceFor(entity)))
 }
 
+function measuredZone(origin, stops) {
+    const points = (stops || []).filter((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y))
+    if (!origin || points.length < 2) return null
+    const cx = points.reduce((sum, point) => sum + point.x, 0) / points.length
+    const cy = points.reduce((sum, point) => sum + point.y, 0) / points.length
+    const face = points.slice().sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx))
+    // ponytail: packets only report the halt. 3 m past that halt is the blocked side. Upgrade path: another probe past the face.
+    const far = face.map((point) => {
+        const dx = point.x - origin.x
+        const dy = point.y - origin.y
+        const len = Math.hypot(dx, dy) || 1
+        return { x: point.x + (dx / len) * 3, y: point.y + (dy / len) * 3 }
+    })
+    return [...face, ...far.reverse()]
+}
+
 function steerPoint(player, node, entities, step, avoid) {
     const away = distance(player, node)
     if (away < 0.2) return { x: node.x, y: node.y }
@@ -442,6 +458,7 @@ module.exports = {
     solveAffine,
     solveView,
     steerPoint,
+    measuredZone,
     stepHitsMob,
     calibrationNode,
     pickTarget,
@@ -493,6 +510,10 @@ if (require.main === module) {
     assert.strictEqual(harvestLift({ scale: 14, view: { xx: 14, yx: 0, ty: 200 } }, 0), 0)
     assert.strictEqual(stepHitsMob({ x: 0, y: 0 }, { x: 10, y: 0 }, [{ kind: 'mob', x: 40, y: 0 }]), false)
     assert.strictEqual(stepHitsMob({ x: 0, y: 0 }, { x: 10, y: 0 }, [{ kind: 'mob', x: 8, y: 0 }]), true)
+    const shape = measuredZone({ x: 0, y: 0 }, [{ x: 8, y: -2 }, { x: 8, y: 2 }, { x: 7, y: 5 }])
+    assert.strictEqual(shape.length, 6)
+    assert.ok(shape.some((point) => point.x === 8 && point.y === -2))
+    assert.strictEqual(measuredZone({ x: 0, y: 0 }, [{ x: 4, y: 0 }]), null)
     assert.strictEqual(stepHitsMob({ x: 0, y: 0 }, { x: 10, y: 0 }, [{ kind: 'mob', passive: true, x: 8, y: 0 }]), false)
     const pulled = clampToWindow({ x: 900, y: 20 }, { left: 0, top: 0, right: 1000, bottom: 800 })
     assert.ok(Math.abs(pulled.x - 500) <= 200)

@@ -46,7 +46,8 @@ function createHarvests(filePath) {
             scale: aim.scale,
             angle: aim.angle,
             lift: aim.lift || 0,
-            at: Date.now(),
+            px: aim.px,
+            py: aim.py,
         }
         const index = spots.findIndex((saved) => same(saved, node, map))
         if (index >= 0) spots[index] = spot
@@ -67,10 +68,12 @@ if (require.main === module) {
     const os = require('os')
     const file = path.join(os.tmpdir(), 'albion-harvests-check.json')
     const book = createHarvests(file)
-    book.remember('map', { x: 10, y: 10, name: 'rock', tier: 2, size: 6 }, { scale: 14, angle: 2, lift: 1 })
+    book.remember('map', { x: 10, y: 10, name: 'rock', tier: 2, size: 6 }, { scale: 14, angle: 2, lift: 1, px: 8, py: 9 })
     const hit = book.find('map', { x: 12, y: 11, name: 'rock', tier: 2 })
     assert.strictEqual(hit.scale, 14)
     assert.strictEqual(hit.lift, 1)
+    assert.strictEqual(hit.px, 8)
+    assert.strictEqual(hit.py, 9)
     assert.strictEqual(book.find('map', { x: 40, y: 40, name: 'rock', tier: 2 }), null)
     assert.strictEqual(book.find('map', { x: 11, y: 10, name: 'ore', tier: 2 }), null)
     book.remember('map', { x: 11, y: 10, name: 'rock', tier: 2, size: 3 }, { scale: 17, angle: -4, lift: 2 })
