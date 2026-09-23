@@ -209,9 +209,12 @@ function createGather(snapshot, emit, terrain) {
             if (parameters[3] != null) activeHarvestId = String(parameters[3])
         }
         if (kind === 'event' && code === 46 && parameters[0] != null) {
+            const id = String(parameters[0])
             const size = Number(parameters[1])
-            if (Number.isFinite(size) && size > 0) harvestSeenAt = now
-            else activeHarvestId = null
+            if (id === activeHarvestId) {
+                if (Number.isFinite(size) && size > 0) harvestSeenAt = now
+                else activeHarvestId = null
+            }
         }
         if (kind === 'event' && (code === 60 || code === 61)) harvestEndedAt = now
         if (kind === 'request' && (code === 22 || code === 21) && parameters[0] != null) {
@@ -505,10 +508,10 @@ function createGather(snapshot, emit, terrain) {
         const ny = Math.sin(toward)
         const px = -ny
         const py = nx
-        const cx = player.x + nx * 4
-        const cy = player.y + ny * 4
-        const halfW = 6
-        const halfD = 2
+        const cx = player.x + nx * 5
+        const cy = player.y + ny * 5
+        const halfW = 10
+        const halfD = 3
         return [
             { x: cx + px * halfW - nx * halfD, y: cy + py * halfW - ny * halfD },
             { x: cx - px * halfW - nx * halfD, y: cy - py * halfW - ny * halfD },
@@ -662,34 +665,40 @@ function createGather(snapshot, emit, terrain) {
             stuck.reset(player, now)
         }
         stuck.update(player, now)
-        if (stuck.isStuck(now) && away <= 8 && !channel && !(harvestSeenAt && now - harvestSeenAt < 8000)) {
+        if (sidestepped && now - lastClick >= 1500) {
+            const toward = Math.atan2(node.y - player.y, node.x - player.x)
+            const slid = sidestepFrom && distance(player, sidestepFrom) >= 1.5
+            const face = sidestepFrom || player
+            sidestepped = false
+            sidestepFrom = null
+            if (terrain) terrain.addZone(player.map, barrier(face, toward))
+            leaveNode(node.id, 8000, slid ? 'wall' : 'cliff', slid
+                ? `Wall in front of ${label(node)}. Drew it; the path goes around.`
+                : `Cliff in front of ${label(node)}. Drew the face; the path goes around it. Mark the green edge later if there is a way up.`)
+            return
+        }
+        if (sidestepped) {
+            publish('walking', `Checking the side step at ${label(node)}.`)
+            return
+        }
+        if (stuck.isStuck(now) && !channel && away <= REACH) {
             stuck.reset(player, now)
             leaveNode(node.id, 8000, 'not moving', `Stopped clicking ${label(node)}. You are standing still.`)
             return
         }
-        if (stuck.isStuck(now) && !channel && !(harvestSeenAt && now - harvestSeenAt < 8000) && !(lastOrder && distance(lastOrder, node) < 3)) {
+        if (stuck.isStuck(now) && !channel) {
             stuck.reset(player, now)
             const toward = Math.atan2(node.y - player.y, node.x - player.x)
-            if (!sidestepped) {
-                sidestepped = true
-                sidestepFrom = { x: player.x, y: player.y }
-                const side = {
-                    x: player.x + Math.cos(toward + Math.PI / 2) * 6,
-                    y: player.y + Math.sin(toward + Math.PI / 2) * 6,
-                }
-                const from = tracker.predict(0.25) || player
-                if (!clickAt(projectPoint(from, side, rect, settings), rect)) return
-                rememberClick(side, rect)
-                publish('walking', `Not moving toward ${label(node)}. Stepping sideways to see if this is a wall.`)
-                return
+            sidestepped = true
+            sidestepFrom = { x: player.x, y: player.y }
+            const side = {
+                x: player.x + Math.cos(toward + Math.PI / 2) * 6,
+                y: player.y + Math.sin(toward + Math.PI / 2) * 6,
             }
-            const slid = sidestepFrom && distance(player, sidestepFrom) >= 1.5
-            sidestepped = false
-            sidestepFrom = null
-            if (terrain) terrain.addZone(player.map, barrier(player, toward))
-            leaveNode(node.id, 8000, slid ? 'wall' : 'cliff', slid
-                ? `Wall in front of ${label(node)}. Drew it; the path goes around.`
-                : `Cliff in front of ${label(node)}. Drew the face; the path goes around it. Mark the green edge later if there is a way up.`)
+            const from = tracker.predict(0.25) || player
+            if (!clickAt(projectPoint(from, side, rect, settings), rect)) return
+            rememberClick(side, rect)
+            publish('walking', `Not moving toward ${label(node)}. Stepping sideways to see if this is a wall.`)
             return
         }
         const close = away <= 8
